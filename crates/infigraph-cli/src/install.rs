@@ -402,7 +402,7 @@ pub(crate) fn cmd_update() -> Result<()> {
     let gh_host =
         std::env::var("INFIGRAPH_GH_HOST").unwrap_or_else(|_| "github.com".to_string());
     let gh_owner =
-        std::env::var("INFIGRAPH_GH_OWNER").unwrap_or_else(|_| "anthropics".to_string());
+        std::env::var("INFIGRAPH_GH_OWNER").unwrap_or_else(|_| "intuit".to_string());
     let gh_repo = "infigraph";
 
     let is_ghe = gh_host != "github.com";
