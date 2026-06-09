@@ -3,9 +3,20 @@ mod registry;
 pub use registry::LanguageRegistry;
 
 use anyhow::Result;
+use serde::Deserialize;
 use tree_sitter::{Language, Query};
 
 use crate::model::{Relation, Symbol};
+
+/// A custom edge type that a language pack can define beyond the standard
+/// CALLS/IMPORTS/INHERITS model. Custom edges are populated during extraction
+/// when capture groups matching `@{capture}.source` / `@{capture}.target`
+/// are found in relations.scm.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CustomEdgeDef {
+    pub name: String,
+    pub capture: String,
+}
 
 /// Trait for custom extraction backends (e.g., JVM grammar plugins).
 pub trait CustomExtractor: Send + Sync {
@@ -32,6 +43,7 @@ pub struct LanguagePack {
     pub name: String,
     pub extensions: Vec<String>,
     pub backend: ParserBackend,
+    pub custom_edges: Vec<CustomEdgeDef>,
 }
 
 impl LanguagePack {
@@ -53,7 +65,22 @@ impl LanguagePack {
                 entity_query,
                 relation_query,
             },
+            custom_edges: Vec::new(),
         })
+    }
+
+    /// Create a tree-sitter-backed language pack with custom edge definitions.
+    pub fn new_with_custom_edges(
+        name: &str,
+        extensions: Vec<&str>,
+        grammar: Language,
+        entity_query_src: &str,
+        relation_query_src: &str,
+        custom_edges: Vec<CustomEdgeDef>,
+    ) -> Result<Self> {
+        let mut pack = Self::new(name, extensions, grammar, entity_query_src, relation_query_src)?;
+        pack.custom_edges = custom_edges;
+        Ok(pack)
     }
 
     /// Create a language pack with a custom extraction backend.
@@ -66,6 +93,7 @@ impl LanguagePack {
             name: name.to_string(),
             extensions,
             backend: ParserBackend::Custom(extractor),
+            custom_edges: Vec::new(),
         }
     }
 }

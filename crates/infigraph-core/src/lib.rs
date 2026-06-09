@@ -249,6 +249,106 @@ impl Infigraph {
         Ok(())
     }
 
+    /// Index a batch of files by path, returning an IndexResult with all extractions.
+    pub fn index_files(&self, paths: &[PathBuf]) -> Result<IndexResult> {
+        let store = self.store.as_ref().context("call init() first")?;
+
+        if paths.is_empty() {
+            return Ok(IndexResult {
+                total_files: 0,
+                indexed_files: 0,
+                extractions: Vec::new(),
+                resolve_stats: resolve::ResolveStats {
+                    total_calls: 0,
+                    resolved: 0,
+                    unresolved: 0,
+                    learned_resolved: 0,
+                    inherits_resolved: 0,
+                },
+            });
+        }
+
+        let extractions: Vec<FileExtraction> = paths
+            .par_iter()
+            .filter_map(|path| {
+                let rel = if path.is_absolute() {
+                    path.strip_prefix(&self.root)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                } else {
+                    path.to_string_lossy().replace('\\', "/")
+                };
+                let abs = self.root.join(&rel);
+                let source = std::fs::read(&abs).ok()?;
+                let pack = self.registry.for_file_with_content(&rel, &source)?;
+                extract::extract_file(&rel, &source, pack).ok()
+            })
+            .collect();
+
+        let extractions = {
+            let mut seen = std::collections::HashSet::new();
+            extractions
+                .into_iter()
+                .filter(|e| seen.insert(e.file.clone()))
+                .collect::<Vec<_>>()
+        };
+
+        let indexed = extractions.len();
+
+        if !extractions.is_empty() {
+            let conn = store.connection()?;
+            conn.query("BEGIN TRANSACTION")
+                .context("failed to begin batch delete transaction")?;
+            let file_list: Vec<String> = extractions
+                .iter()
+                .map(|e| format!("'{}'", escape_str(&e.file)))
+                .collect();
+            let files_in = file_list.join(", ");
+            let _ = conn.query(&format!(
+                "MATCH (s:Symbol) WHERE s.file IN [{files_in}] DETACH DELETE s"
+            ));
+            let _ = conn.query(&format!(
+                "MATCH (m:Module) WHERE m.file IN [{files_in}] DETACH DELETE m"
+            ));
+            let _ = conn.query(&format!(
+                "MATCH (f:File) WHERE f.id IN [{files_in}] DETACH DELETE f"
+            ));
+            conn.query("COMMIT")
+                .context("failed to commit batch delete transaction")?;
+
+            if indexed > 10 {
+                store.upsert_all_parquet(&extractions)?;
+            } else {
+                let conn = store.connection()?;
+                store.upsert_all_bulk(&conn, &extractions)?;
+            }
+
+            let file_paths: Vec<&str> = extractions.iter().map(|e| e.file.as_str()).collect();
+            let conn = store.connection()?;
+            store.upsert_folders_bulk_conn(&conn, &file_paths)?;
+        }
+
+        let resolve_stats =
+            resolve::resolve_calls_incremental(store, &extractions, None).unwrap_or_else(|e| {
+                eprintln!("warning: call resolution failed: {e}");
+                resolve::ResolveStats {
+                    total_calls: 0,
+                    resolved: 0,
+                    unresolved: 0,
+                    learned_resolved: 0,
+                    inherits_resolved: 0,
+                }
+            });
+
+        Ok(IndexResult {
+            total_files: paths.len(),
+            indexed_files: indexed,
+            extractions,
+            resolve_stats,
+        })
+    }
+
     /// Detect cross-language bridges (FFI, JNI, cgo, gRPC, P/Invoke, WASM, ctypes).
     pub fn detect_bridges(&self) -> Result<bridges::BridgeScanResult> {
         bridges::detect_bridges(&self.root)

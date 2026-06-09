@@ -260,10 +260,10 @@ pub(crate) fn import_scip_and_cleanup(root: &Path) {
         Some(s) => s,
         None => return,
     };
-    match infigraph_core::scip::import_scip_index(&scip_out, store) {
+    match infigraph_core::scip::import_scip_index(&scip_out, store, Some(root)) {
         Ok(stats) => println!(
-            "Auto-SCIP: enriched {} symbols, {} relations added",
-            stats.symbols_enriched, stats.relations_added
+            "Auto-SCIP: enriched {} symbols, {} relations added, {} learned corrections",
+            stats.symbols_enriched, stats.relations_added, stats.corrections_learned
         ),
         Err(e) => eprintln!("Auto-SCIP: import failed: {e}"),
     }

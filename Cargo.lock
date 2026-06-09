@@ -1724,11 +1724,14 @@ name = "infigraph-mcp"
 version = "0.15.0"
 dependencies = [
  "anyhow",
+ "infigraph-confluence",
  "infigraph-core",
+ "infigraph-docs",
  "infigraph-languages",
  "rayon",
  "serde",
  "serde_json",
+ "sha2",
  "tiny_http",
 ]
 

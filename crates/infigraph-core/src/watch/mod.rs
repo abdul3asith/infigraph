@@ -8,6 +8,7 @@ use anyhow::Result;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::Infigraph;
+use batch::ChangeBatch;
 
 /// A single file-change event emitted by the watcher.
 #[derive(Debug, Clone)]
@@ -50,6 +51,10 @@ impl std::fmt::Display for WatchEvent {
 /// If so, sets `WatchEvent.has_cross_file_calls = true` so the caller can
 /// prompt the user to run a full reindex (to re-resolve dangling call targets).
 ///
+/// `on_periodic` is called every `periodic_secs` seconds when at least one file
+/// has changed since the last call. It receives the IndexResult from a full
+/// reindex and can run expensive post-processing (e.g., SCIP import).
+///
 /// Blocks until `stop_rx` receives a signal.
 pub fn watch_project(
     prism: &Infigraph,
@@ -57,14 +62,34 @@ pub fn watch_project(
     stop_rx: mpsc::Receiver<()>,
     on_event: impl Fn(WatchEvent) + Send + 'static,
 ) -> Result<()> {
+    watch_project_with_periodic(
+        prism,
+        debounce_ms,
+        stop_rx,
+        on_event,
+        0,
+        None::<fn(&crate::IndexResult)>,
+    )
+}
+
+pub fn watch_project_with_periodic<F>(
+    prism: &Infigraph,
+    debounce_ms: u64,
+    stop_rx: mpsc::Receiver<()>,
+    on_event: impl Fn(WatchEvent) + Send + 'static,
+    periodic_secs: u64,
+    on_periodic: Option<F>,
+) -> Result<()>
+where
+    F: Fn(&crate::IndexResult) + Send + 'static,
+{
     let (tx, rx) = mpsc::channel::<notify::Result<Event>>();
 
     let config = Config::default().with_poll_interval(Duration::from_millis(debounce_ms));
 
     let mut watcher = RecommendedWatcher::new(tx, config)?;
-    watcher.watch(prism.root(), RecursiveMode::Recursive)?;
 
-    let ignore_dirs = [
+    let ignore_dirs: &[&str] = &[
         ".infigraph",
         ".git",
         "node_modules",
@@ -77,9 +102,75 @@ pub fn watch_project(
         ".tox",
     ];
 
+    // Watch directories selectively instead of RecursiveMode::Recursive
+    // to avoid exhausting file descriptors on repos with node_modules/target
+    register_watch_dirs(&mut watcher, prism.root(), ignore_dirs)?;
+
+    let mut changes_since_periodic: usize = 0;
+    let mut last_periodic = std::time::Instant::now();
+
+    // Batch accumulator: collect file changes over a 1-second window
+    // then index them all at once using the bulk write path.
+    let mut batch = ChangeBatch::new(1000);
+
     loop {
         if stop_rx.try_recv().is_ok() {
             break;
+        }
+
+        // Periodic SCIP refresh: if changes accumulated and enough time passed
+        if periodic_secs > 0
+            && changes_since_periodic > 0
+            && last_periodic.elapsed() >= Duration::from_secs(periodic_secs)
+        {
+            if let Some(ref cb) = on_periodic {
+                match prism.index() {
+                    Ok(result) => {
+                        if !result.extractions.is_empty() {
+                            cb(&result);
+                        }
+                    }
+                    Err(e) => eprintln!("[watch] periodic reindex failed: {e}"),
+                }
+            }
+            changes_since_periodic = 0;
+            last_periodic = std::time::Instant::now();
+        }
+
+        // Flush the batch when the window has closed
+        if !batch.is_empty() && batch.is_ready() {
+            let paths = batch.drain();
+            let count = paths.len();
+            eprintln!("[watch] batch indexing {count} files");
+
+            match prism.index_files(&paths) {
+                Ok(result) => {
+                    changes_since_periodic += result.indexed_files;
+
+                    if let Some(store) = prism.store() {
+                        let changed: Vec<&str> =
+                            result.extractions.iter().map(|e| e.file.as_str()).collect();
+                        if !changed.is_empty() {
+                            if let Err(e) =
+                                crate::embed::update_embeddings(store, prism.root(), &changed)
+                            {
+                                eprintln!("[watch] batch embedding update failed: {e}");
+                            }
+                        }
+                    }
+
+                    for extraction in &result.extractions {
+                        let cross = has_cross_file_calls(prism, &extraction.file);
+                        let abs_path = prism.root().join(&extraction.file);
+                        on_event(WatchEvent {
+                            kind: WatchEventKind::Modified,
+                            path: abs_path,
+                            has_cross_file_calls: cross,
+                        });
+                    }
+                }
+                Err(e) => eprintln!("[watch] batch reindex failed: {e}"),
+            }
         }
 
         match rx.recv_timeout(Duration::from_millis(200)) {
@@ -92,7 +183,7 @@ pub fn watch_project(
                 };
 
                 for path in event.paths {
-                    if should_ignore(&path, &ignore_dirs) {
+                    if should_ignore(&path, ignore_dirs) {
                         continue;
                     }
 
@@ -104,6 +195,7 @@ pub fn watch_project(
                     match watch_kind {
                         WatchEventKind::Removed => {
                             let _ = prism.remove_file(&path);
+                            changes_since_periodic += 1;
                             on_event(WatchEvent {
                                 kind: watch_kind.clone(),
                                 path,
@@ -112,29 +204,7 @@ pub fn watch_project(
                         }
                         WatchEventKind::Created | WatchEventKind::Modified => {
                             if prism.registry().for_file(&rel).is_some() {
-                                match prism.index_file(&path) {
-                                    Ok(_) => {
-                                        if let Some(store) = prism.store() {
-                                            let changed = [rel.as_str()];
-                                            if let Err(e) = crate::embed::update_embeddings(
-                                                store,
-                                                prism.root(),
-                                                &changed,
-                                            ) {
-                                                eprintln!(
-                                                    "watch: embedding update failed for {rel}: {e}"
-                                                );
-                                            }
-                                        }
-                                        let cross = has_cross_file_calls(prism, &rel);
-                                        on_event(WatchEvent {
-                                            kind: watch_kind.clone(),
-                                            path,
-                                            has_cross_file_calls: cross,
-                                        });
-                                    }
-                                    Err(e) => eprintln!("watch: reindex failed for {rel}: {e}"),
-                                }
+                                batch.add(path);
                             }
                         }
                     }
@@ -149,10 +219,13 @@ pub fn watch_project(
     Ok(())
 }
 
-/// Like `watch_project` but automatically runs a full reindex when cross-file call edges
-/// are affected by a change, keeping call resolution accurate without user intervention.
-/// `make_registry` is a factory fn (e.g. `infigraph_languages::bundled_registry`) to
-/// create a fresh LanguageRegistry for the auto-reindex pass.
+/// Like `watch_project` but automatically re-resolves cross-file call edges
+/// when affected by a change, keeping call resolution accurate without user intervention.
+///
+/// Instead of running a full `prism.index()` (re-parsing every file), this collects
+/// the changed file plus its cross-file dependents and uses `prism.index_files()` to
+/// re-index only the affected subset, then runs targeted re-resolution via
+/// `resolve::re_resolve_for_files()`.
 pub fn watch_project_auto_resolve(
     prism: &Infigraph,
     debounce_ms: u64,
@@ -169,28 +242,68 @@ pub fn watch_project_auto_resolve(
                 if let Ok(reg) = make_registry() {
                     if let Ok(mut p) = Infigraph::open(&root, reg) {
                         if p.init().is_ok() {
-                            match p.index() {
+                            let changed_rel = evt
+                                .path
+                                .strip_prefix(&root)
+                                .map(|r| r.to_string_lossy().replace('\\', "/"))
+                                .unwrap_or_else(|_| {
+                                    evt.path.to_string_lossy().replace('\\', "/")
+                                });
+                            let mut affected_files = vec![evt.path.clone()];
+
+                            if let Some(store) = p.store() {
+                                let deps = get_cross_file_dependents(store, &changed_rel);
+                                for dep_rel in deps {
+                                    let dep_abs = root.join(&dep_rel);
+                                    if dep_abs.exists() {
+                                        affected_files.push(dep_abs);
+                                    }
+                                }
+                            }
+
+                            match p.index_files(&affected_files) {
                                 Ok(r) => {
                                     eprintln!(
-                                        "[watch {prefix}] auto full reindex: {}/{} files",
+                                        "[watch {prefix}] targeted reindex: {}/{} affected files",
                                         r.indexed_files, r.total_files
                                     );
+
                                     if let Some(store) = p.store() {
+                                        let file_strs: Vec<String> =
+                                            r.extractions.iter().map(|e| e.file.clone()).collect();
+                                        match crate::resolve::re_resolve_for_files(
+                                            store,
+                                            &file_strs,
+                                            &r.extractions,
+                                            None,
+                                        ) {
+                                            Ok(stats) => {
+                                                eprintln!(
+                                                    "[watch {prefix}] re-resolved: {stats}"
+                                                )
+                                            }
+                                            Err(e) => eprintln!(
+                                                "[watch {prefix}] re-resolve failed: {e}"
+                                            ),
+                                        }
+
                                         let changed: Vec<&str> =
                                             r.extractions.iter().map(|e| e.file.as_str()).collect();
                                         match crate::embed::update_embeddings(
                                             store, &root, &changed,
                                         ) {
-                                            Ok(n) => {
-                                                eprintln!("[watch {prefix}] updated {n} embeddings")
-                                            }
+                                            Ok(n) => eprintln!(
+                                                "[watch {prefix}] updated {n} embeddings"
+                                            ),
                                             Err(e) => eprintln!(
                                                 "[watch {prefix}] embedding update failed: {e}"
                                             ),
                                         }
                                     }
                                 }
-                                Err(e) => eprintln!("[watch {prefix}] auto reindex failed: {e}"),
+                                Err(e) => {
+                                    eprintln!("[watch {prefix}] targeted reindex failed: {e}")
+                                }
                             }
                         }
                     }
@@ -202,8 +315,41 @@ pub fn watch_project_auto_resolve(
     })
 }
 
+/// Returns the relative paths of files that have cross-file CALLS edges to/from the given file.
+fn get_cross_file_dependents(store: &crate::graph::GraphStore, rel_path: &str) -> Vec<String> {
+    let conn = match store.connection() {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let escaped = rel_path.replace('\'', "\\'");
+    let mut dependents = std::collections::HashSet::new();
+
+    let q1 = format!(
+        "MATCH (a:Symbol)-[:CALLS]->(b:Symbol) WHERE a.file = '{escaped}' AND b.file <> '{escaped}' RETURN DISTINCT b.file"
+    );
+    if let Ok(result) = conn.query(&q1) {
+        for row in result {
+            if let Some(val) = row.first() {
+                dependents.insert(val.to_string());
+            }
+        }
+    }
+
+    let q2 = format!(
+        "MATCH (a:Symbol)-[:CALLS]->(b:Symbol) WHERE b.file = '{escaped}' AND a.file <> '{escaped}' RETURN DISTINCT a.file"
+    );
+    if let Ok(result) = conn.query(&q2) {
+        for row in result {
+            if let Some(val) = row.first() {
+                dependents.insert(val.to_string());
+            }
+        }
+    }
+
+    dependents.into_iter().collect()
+}
+
 /// Returns true if the file has any resolved CALLS edges to/from symbols in other files.
-/// These edges become stale when the file changes — a full reindex is needed to re-resolve.
 fn has_cross_file_calls(prism: &Infigraph, rel_path: &str) -> bool {
     let store = match prism.store() {
         Some(s) => s,
@@ -214,7 +360,6 @@ fn has_cross_file_calls(prism: &Infigraph, rel_path: &str) -> bool {
         Err(_) => return false,
     };
     let escaped = rel_path.replace('\'', "\\'");
-    // Check outgoing cross-file calls (this file calls symbols in other files)
     let q = format!(
         "MATCH (a:Symbol)-[:CALLS]->(b:Symbol) WHERE a.file = '{escaped}' AND b.file <> '{escaped}' RETURN count(*) LIMIT 1"
     );
@@ -227,7 +372,6 @@ fn has_cross_file_calls(prism: &Infigraph, rel_path: &str) -> bool {
             }
         }
     }
-    // Check incoming cross-file calls (other files call symbols in this file)
     let q2 = format!(
         "MATCH (a:Symbol)-[:CALLS]->(b:Symbol) WHERE b.file = '{escaped}' AND a.file <> '{escaped}' RETURN count(*) LIMIT 1"
     );
@@ -246,4 +390,34 @@ fn should_ignore(path: &Path, ignore_dirs: &[&str]) -> bool {
         let s = c.as_os_str().to_string_lossy();
         ignore_dirs.contains(&s.as_ref()) || s.starts_with('.')
     })
+}
+
+fn register_watch_dirs(
+    watcher: &mut RecommendedWatcher,
+    root: &Path,
+    ignore_dirs: &[&str],
+) -> Result<()> {
+    watcher.watch(root, RecursiveMode::NonRecursive)?;
+    register_subdirs(watcher, root, ignore_dirs);
+    Ok(())
+}
+
+fn register_subdirs(watcher: &mut RecommendedWatcher, dir: &Path, ignore_dirs: &[&str]) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if ignore_dirs.contains(&name_str.as_ref()) || name_str.starts_with('.') {
+            continue;
+        }
+        let _ = watcher.watch(&path, RecursiveMode::NonRecursive);
+        register_subdirs(watcher, &path, ignore_dirs);
+    }
 }

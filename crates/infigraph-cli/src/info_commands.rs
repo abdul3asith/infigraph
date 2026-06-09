@@ -265,14 +265,15 @@ pub(crate) fn cmd_scip_import(root: &Path, index_path: &Path) -> Result<()> {
     };
 
     println!("Importing SCIP index from {}", abs_index.display());
-    let stats = infigraph_core::scip::import_scip_index(&abs_index, store)?;
+    let stats = infigraph_core::scip::import_scip_index(&abs_index, store, Some(root))?;
     println!(
-        "SCIP import complete:\n  files processed: {}\n  symbols added: {}\n  symbols enriched: {}\n  relations added: {}\n  references added: {}",
+        "SCIP import complete:\n  files processed: {}\n  symbols added: {}\n  symbols enriched: {}\n  relations added: {}\n  references added: {}\n  corrections learned: {}",
         stats.files_processed,
         stats.symbols_added,
         stats.symbols_enriched,
         stats.relations_added,
         stats.references_added,
+        stats.corrections_learned,
     );
     Ok(())
 }

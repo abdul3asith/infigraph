@@ -90,10 +90,11 @@ pub enum RelationKind {
     Writes,
     TestedBy,
     Tests,
+    Custom(String),
 }
 
 impl RelationKind {
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             Self::Calls => "CALLS",
             Self::CalledBy => "CALLED_BY",
@@ -109,6 +110,7 @@ impl RelationKind {
             Self::Writes => "WRITES",
             Self::TestedBy => "TESTED_BY",
             Self::Tests => "TESTS",
+            Self::Custom(name) => name.as_str(),
         }
     }
 }

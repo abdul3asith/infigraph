@@ -2749,14 +2749,15 @@ fn tool_scip_import(args: &Value) -> Result<String> {
         root.join(index_rel)
     };
 
-    let stats = infigraph_core::scip::import_scip_index(&index_path, store)?;
+    let stats = infigraph_core::scip::import_scip_index(&index_path, store, Some(&root))?;
     let mut out = format!(
-        "SCIP import complete:\n  files processed: {}\n  symbols added: {}\n  symbols enriched: {}\n  relations added: {}\n  references added: {}",
+        "SCIP import complete:\n  files processed: {}\n  symbols added: {}\n  symbols enriched: {}\n  relations added: {}\n  references added: {}\n  corrections learned: {}",
         stats.files_processed,
         stats.symbols_added,
         stats.symbols_enriched,
         stats.relations_added,
         stats.references_added,
+        stats.corrections_learned,
     );
     let path = args.get("path").and_then(|p| p.as_str()).unwrap_or(".");
     if let Some(msg) = auto_start_watch(path) {

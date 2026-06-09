@@ -252,7 +252,7 @@ enum Commands {
 
     /// Index Confluence pages into the document graph (fetch, parse, chunk, embed)
     IndexConfluence {
-        /// Confluence base URL (e.g. https://wiki.cloud.intuit.com)
+        /// Confluence base URL (e.g. https://confluence.example.com)
         #[arg(long)]
         base_url: String,
         /// Confluence space key to index
