@@ -31,3 +31,8 @@ thiserror = "2"
 # limit on Windows when compiled in debug mode (LNK1248).
 [profile.dev.package.lbug]
 opt-level = 2
+
+# esaxx-rs hardcodes static_crt(true) (/MT) which conflicts with lbug's /MD
+# (dynamic CRT) on Windows MSVC, causing LNK2038 linker errors.
+[patch.crates-io]
+esaxx-rs = { path = "patches/esaxx-rs" }
