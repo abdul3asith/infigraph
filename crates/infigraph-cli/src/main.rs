@@ -8,6 +8,7 @@ mod hooks;
 mod index;
 mod info_commands;
 mod install;
+mod scip_download;
 mod search_commands;
 mod viz_commands;
 
@@ -466,6 +467,16 @@ enum Commands {
         #[arg(long)]
         save: bool,
     },
+
+    /// Background SCIP enrichment (spawned by index)
+    #[command(hide = true)]
+    ScipEnrich {
+        /// Comma-separated detected languages
+        languages: String,
+    },
+
+    /// Remove cached SCIP runtime binaries (Node.js, JRE, .NET SDK, Dart SDK, PHP)
+    CleanRuntimes,
 }
 
 #[derive(Subcommand)]
@@ -655,6 +666,20 @@ fn main() -> Result<()> {
         Commands::BridgesPromote => cmd_bridges_promote(&root),
         Commands::DetectPatterns { pattern, json } => {
             cmd_detect_patterns(&root, pattern.as_deref(), json)
+        }
+        Commands::ScipEnrich { languages } => {
+            let detected: std::collections::HashSet<String> = languages
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            index::cmd_scip_enrich(&root, &detected);
+            Ok(())
+        }
+        Commands::CleanRuntimes => {
+            scip_download::clean_runtimes();
+            println!("All cached SCIP runtimes removed.");
+            Ok(())
         }
         Commands::BenchQuality { save } => {
             let registry = bundled_registry()?;

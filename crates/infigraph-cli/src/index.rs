@@ -72,7 +72,7 @@ pub(crate) fn cmd_index(root: &Path, full: bool, no_embed: bool) -> Result<()> {
 
     // Compute and save embeddings — only for new/changed symbols
     if no_embed {
-        auto_scip(root, &result)?;
+        auto_scip(root, &result, prism.store())?;
         return Ok(());
     }
     {
@@ -89,7 +89,7 @@ pub(crate) fn cmd_index(root: &Path, full: bool, no_embed: bool) -> Result<()> {
     }
 
     // Auto-SCIP: detect languages and run available SCIP indexers
-    auto_scip(root, &result)?;
+    auto_scip(root, &result, prism.store())?;
 
     Ok(())
 }
@@ -103,142 +103,24 @@ pub(crate) fn on_path(cmd: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Try to install an LSP server automatically. Returns true if now available.
-pub(crate) fn try_install_lsp(lsp_server: &str) -> bool {
-    if on_path(lsp_server) {
-        return true;
-    }
+pub(crate) fn import_scip_and_cleanup(root: &Path, scip_path: Option<&std::path::Path>, existing_store: Option<&infigraph_core::graph::GraphStore>) {
+    let scip_out = scip_path
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| root.join("index.scip"));
+    if !scip_out.exists() { return; }
 
-    let os = std::env::consts::OS;
-    let has_brew = on_path("brew");
-    let has_apt = on_path("apt-get");
-    let has_npm = on_path("npm");
-    let has_pip = on_path("pip3") || on_path("pip");
-    let has_gem = on_path("gem");
-    let has_cargo = on_path("cargo");
-    let has_opam = on_path("opam");
-    let has_ghcup = on_path("ghcup");
-    let has_dotnet = on_path("dotnet");
-
-    #[allow(clippy::type_complexity)]
-    let installs: &[(&str, &[(&str, &str, &[&str])])] = &[
-        ("typescript-language-server", &[("any", "npm", &["install", "-g", "typescript-language-server"])]),
-        ("pylsp", &[("any", "pip3", &["install", "python-lsp-server"]), ("any", "pip", &["install", "python-lsp-server"])]),
-        ("rust-analyzer", &[("any", "rustup", &["component", "add", "rust-analyzer"])]),
-        ("solargraph", &[("any", "gem", &["install", "solargraph"])]),
-        ("lua-language-server", &[("macos", "brew", &["install", "lua-language-server"]), ("linux", "apt-get", &["install", "-y", "lua-language-server"])]),
-        ("clangd", &[("macos", "brew", &["install", "llvm"]), ("linux", "apt-get", &["install", "-y", "clangd"])]),
-        ("zls", &[("any", "cargo", &["install", "zls"])]),
-        ("clojure-lsp", &[("macos", "brew", &["install", "clojure-lsp/brew/clojure-lsp-native"])]),
-        ("ocamllsp", &[("any", "opam", &["install", "ocaml-lsp-server"])]),
-        ("haskell-language-server-wrapper", &[("any", "ghcup", &["install", "hls"])]),
-        ("fsautocomplete", &[("any", "dotnet", &["tool", "install", "-g", "fsautocomplete"])]),
-        ("pasls", &[("macos", "brew", &["install", "fpc"]), ("linux", "apt-get", &["install", "-y", "fpc"])]),
-        ("intelephense", &[("any", "npm", &["install", "-g", "intelephense"])]),
-        ("erlang-ls", &[("macos", "brew", &["install", "erlang-ls"]), ("linux", "apt-get", &["install", "-y", "erlang-ls"])]),
-        ("jdtls", &[("macos", "brew", &["install", "jdtls"]), ("linux", "apt-get", &["install", "-y", "jdtls"])]),
-        ("gopls", &[("any", "go", &["install", "golang.org/x/tools/gopls@latest"])]),
-        ("omnisharp", &[("any", "dotnet", &["tool", "install", "-g", "csharp-ls"])]),
-        ("sourcekit-lsp", &[("macos", "brew", &["install", "swift"])]),
-        ("dart", &[("macos", "brew", &["install", "dart"]), ("linux", "apt-get", &["install", "-y", "dart"])]),
-        ("elixir-ls", &[("macos", "brew", &["install", "elixir-ls"]), ("linux", "apt-get", &["install", "-y", "elixir-ls"])]),
-        ("pls", &[("any", "cpan", &["App::PerlLanguageServer"])]),
-    ];
-
-    let avail = |installer: &str| match installer {
-        "npm" => has_npm,
-        "pip3" | "pip" => has_pip,
-        "gem" => has_gem,
-        "cargo" => has_cargo,
-        "brew" => has_brew,
-        "apt-get" => has_apt,
-        "opam" => has_opam,
-        "ghcup" => has_ghcup,
-        "dotnet" => has_dotnet,
-        "rustup" => on_path("rustup"),
-        _ => false,
-    };
-
-    if let Some((_, cmds)) = installs.iter().find(|(s, _)| *s == lsp_server) {
-        for (target_os, installer, args) in *cmds {
-            if (*target_os != "any" && *target_os != os) || !avail(installer) {
-                continue;
-            }
-            println!("Auto-SCIP: installing {} via {}...", lsp_server, installer);
-            let ok = std::process::Command::new(installer)
-                .args(*args)
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
-            if ok && on_path(lsp_server) {
-                println!("Auto-SCIP: {} installed", lsp_server);
-                return true;
-            }
-            break;
+    if let Some(store) = existing_store {
+        match infigraph_core::scip::import_scip_index(&scip_out, store, Some(root)) {
+            Ok(stats) => println!(
+                "Auto-SCIP: enriched {} symbols, {} added, {} references, {} new symbols, {} corrections learned",
+                stats.symbols_enriched, stats.relations_added, stats.references_added, stats.symbols_added, stats.corrections_learned
+            ),
+            Err(e) => eprintln!("Auto-SCIP: import failed: {e}"),
         }
-    }
-
-    false
-}
-
-pub(crate) fn run_scip_indexer(root: &Path, cmd: &str, args: &[&str], label: &str) -> bool {
-    println!("Auto-SCIP: {} found — enriching graph...", label);
-    let scip_out = root.join("index.scip");
-    match std::process::Command::new(cmd)
-        .args(args)
-        .current_dir(root)
-        .status()
-    {
-        Ok(s) if s.success() && scip_out.exists() => true,
-        Ok(s) => {
-            eprintln!("Auto-SCIP: {} exited with {}", label, s);
-            false
-        }
-        Err(e) => {
-            eprintln!("Auto-SCIP: failed to run {}: {}", label, e);
-            false
-        }
-    }
-}
-
-pub(crate) fn try_lsp_bridge(root: &Path, lsp_server: &str, lang: &str) -> bool {
-    if !on_path("lsp-to-scip") || !on_path(lsp_server) {
-        return false;
-    }
-    println!(
-        "Auto-SCIP: lsp-to-scip + {} — enriching graph...",
-        lsp_server
-    );
-    let scip_out = root.join("index.scip");
-    match std::process::Command::new("lsp-to-scip")
-        .args([
-            "--server",
-            lsp_server,
-            "--lang",
-            lang,
-            "--out",
-            "index.scip",
-        ])
-        .current_dir(root)
-        .status()
-    {
-        Ok(s) if s.success() && scip_out.exists() => true,
-        Ok(s) => {
-            eprintln!("Auto-SCIP: lsp-to-scip exited with {}", s);
-            false
-        }
-        Err(e) => {
-            eprintln!("Auto-SCIP: lsp-to-scip failed: {}", e);
-            false
-        }
-    }
-}
-
-pub(crate) fn import_scip_and_cleanup(root: &Path) {
-    let scip_out = root.join("index.scip");
-    if !scip_out.exists() {
+        let _ = std::fs::remove_file(&scip_out);
         return;
     }
+
     let registry = match bundled_registry() {
         Ok(r) => r,
         Err(e) => {
@@ -262,85 +144,328 @@ pub(crate) fn import_scip_and_cleanup(root: &Path) {
     };
     match infigraph_core::scip::import_scip_index(&scip_out, store, Some(root)) {
         Ok(stats) => println!(
-            "Auto-SCIP: enriched {} symbols, {} relations added, {} learned corrections",
-            stats.symbols_enriched, stats.relations_added, stats.corrections_learned
+            "Auto-SCIP: enriched {} symbols, {} added, {} references, {} new symbols, {} corrections learned",
+            stats.symbols_enriched, stats.relations_added, stats.references_added, stats.symbols_added, stats.corrections_learned
         ),
         Err(e) => eprintln!("Auto-SCIP: import failed: {e}"),
     }
     let _ = std::fs::remove_file(&scip_out);
 }
 
-pub(crate) fn auto_scip(root: &Path, result: &infigraph_core::IndexResult) -> Result<()> {
-    let mut lang_counts: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
-    for ext in &result.extractions {
-        *lang_counts.entry(ext.language.clone()).or_insert(0) += 1;
-    }
-    if lang_counts.is_empty() {
-        return Ok(());
-    }
-    let dominant = lang_counts
-        .iter()
-        .max_by_key(|(_, c)| *c)
-        .map(|(l, _)| l.clone())
-        .unwrap();
+/// Foreground SCIP execution using scip_download catalog for all detected languages.
+pub(crate) fn auto_scip(root: &Path, result: &infigraph_core::IndexResult, store: Option<&infigraph_core::graph::GraphStore>) -> Result<()> {
+    use crate::scip_download;
+    use std::collections::HashSet;
 
-    #[allow(clippy::type_complexity)]
-    let entries: &[(&[&str], &str, &[&str], &str, &str, &str)] = &[
-        (&["typescript","javascript","tsx"], "scip-typescript", &["index"],             "typescript-language-server", "typescript", "npm i -g @sourcegraph/scip-typescript"),
-        (&["python"],                        "scip-python",      &["index","--cwd","."], "pylsp",                      "python",     "pip install scip-python"),
-        (&["rust"],                          "rust-analyzer",    &["scip","."],          "rust-analyzer",              "rust",       "rustup component add rust-analyzer"),
-        (&["java","kotlin"],                 "scip-java",        &["index"],             "jdtls",                      "java",       "brew install scip-java  # or download from github.com/sourcegraph/scip-java"),
-        (&["go"],                            "scip-go",          &["--cwd","."],         "gopls",                      "go",         "go install github.com/sourcegraph/scip-go@latest"),
-        (&["c","cpp"],                       "",                 &[],                    "clangd",                     "cpp",        "brew install llvm  # provides clangd"),
-        (&["csharp"],                        "",                 &[],                    "omnisharp",                  "csharp",     "dotnet tool install -g csharp-ls"),
-        (&["ruby"],                          "",                 &[],                    "solargraph",                 "ruby",       "gem install solargraph"),
-        (&["swift"],                         "",                 &[],                    "sourcekit-lsp",              "swift",      "brew install swift  # includes sourcekit-lsp"),
-        (&["dart"],                          "",                 &[],                    "dart",                       "dart",       "brew install dart"),
-        (&["elixir"],                        "",                 &[],                    "elixir-ls",                  "elixir",     "brew install elixir-ls"),
-        (&["haskell"],                       "",                 &[],                    "haskell-language-server-wrapper", "haskell", "ghcup install hls"),
-        (&["lua"],                           "",                 &[],                    "lua-language-server",        "lua",        "brew install lua-language-server"),
-        (&["php"],                           "",                 &[],                    "intelephense",               "php",        "npm i -g intelephense"),
-        (&["zig"],                           "",                 &[],                    "zls",                        "zig",        "brew install zls"),
-        (&["pascal"],                        "DelphiLSP64.exe",  &[],                    "pasls",                      "pascal",     "Windows only: place DelphiLSP64.exe on PATH"),
-        (&["fsharp"],                        "",                 &[],                    "fsautocomplete",             "fsharp",     "dotnet tool install -g fsautocomplete"),
-        (&["clojure"],                       "",                 &[],                    "clojure-lsp",                "clojure",    "brew install clojure-lsp/brew/clojure-lsp-native"),
-        (&["erlang"],                        "",                 &[],                    "erlang-ls",                  "erlang",     "brew install erlang-ls"),
-        (&["perl"],                          "",                 &[],                    "pls",                        "perl",       "cpan App::PerlLanguageServer"),
-        (&["ocaml"],                         "",                 &[],                    "ocamllsp",                   "ocaml",      "opam install ocaml-lsp-server"),
-    ];
+    let detected: HashSet<String> = result.extractions.iter()
+        .map(|e| e.language.clone())
+        .collect();
+    if detected.is_empty() { return Ok(()); }
 
-    for (lang_tags, scip_cmd, scip_args, lsp_server, lsp_lang, install_hint) in entries {
-        if !lang_tags.iter().any(|t| *t == dominant) {
-            continue;
-        }
+    let indexers = scip_download::indexers_for_languages(&detected);
+    if indexers.is_empty() { return Ok(()); }
 
-        let has_scip = !scip_cmd.is_empty() && on_path(scip_cmd);
-        let has_lsp = on_path(lsp_server) || (!has_scip && try_install_lsp(lsp_server));
+    println!("Auto-SCIP: found {} applicable indexer(s) for detected languages", indexers.len());
 
-        if !has_scip && !has_lsp {
-            println!(
-                "Auto-SCIP: {} detected but no indexer found — for compiler-grade enrichment install:\n  {}",
-                lang_tags[0], install_hint
-            );
-            continue;
-        }
+    // Parallel download: ensure all indexer binaries are available
+    let binaries: Vec<_> = std::thread::scope(|s| {
+        let handles: Vec<_> = indexers.iter().map(|idx| {
+            s.spawn(move || (*idx, scip_download::ensure_indexer(idx)))
+        }).collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
 
-        let indexed = if has_scip {
-            let ok = run_scip_indexer(root, scip_cmd, scip_args, scip_cmd);
-            if !ok && try_install_lsp(scip_cmd) {
-                run_scip_indexer(root, scip_cmd, scip_args, scip_cmd)
-            } else {
-                ok
+    // Sequential run: each indexer produces index.scip, import, cleanup
+    for (indexer, bin_path) in &binaries {
+        let Some(bin) = bin_path else { continue };
+        if !should_run_indexer(root, indexer) { continue; }
+
+        let cmd_str = bin.to_string_lossy();
+        let extra = scip_download::extra_runtime_paths();
+        let extra_path = if extra.is_empty() { None } else { Some(extra.as_str()) };
+
+        if indexer.binary_name == "scip-java" {
+            let has_gradle = root.join("build.gradle").exists()
+                || root.join("build.gradle.kts").exists()
+                || root.join("settings.gradle").exists()
+                || root.join("settings.gradle.kts").exists();
+            let has_maven = root.join("pom.xml").exists();
+
+            if has_gradle && has_maven {
+                let primary = if root.join("settings.gradle").exists() || root.join("settings.gradle.kts").exists() {
+                    "gradle"
+                } else {
+                    "maven"
+                };
+                let fallback = if primary == "gradle" { "maven" } else { "gradle" };
+
+                println!("Auto-SCIP: detected both Maven and Gradle, trying {primary}");
+                let primary_args = ["index", "--build-tool", primary];
+                if run_scip_indexer(root, &cmd_str, &primary_args, indexer.binary_name, extra_path) {
+                    import_scip_and_cleanup(root, None, store);
+                } else {
+                    println!("Auto-SCIP: {primary} failed, falling back to {fallback}");
+                    let fallback_args = ["index", "--build-tool", fallback];
+                    if run_scip_indexer(root, &cmd_str, &fallback_args, indexer.binary_name, extra_path) {
+                        import_scip_and_cleanup(root, None, store);
+                    }
+                }
+            } else if run_scip_indexer(root, &cmd_str, indexer.scip_args, indexer.binary_name, extra_path) {
+                import_scip_and_cleanup(root, None, store);
             }
-        } else {
-            try_lsp_bridge(root, lsp_server, lsp_lang)
-        };
+            continue;
+        }
 
-        if indexed {
-            import_scip_and_cleanup(root);
+        if run_scip_indexer(root, &cmd_str, indexer.scip_args, indexer.binary_name, extra_path) {
+            import_scip_and_cleanup(root, None, store);
         }
     }
 
     Ok(())
+}
+
+pub(crate) fn run_scip_indexer(root: &Path, cmd: &str, args: &[&str], label: &str, extra_path: Option<&str>) -> bool {
+    println!("Auto-SCIP: running {label}...");
+    let scip_out = root.join("index.scip");
+    let mut command = std::process::Command::new(cmd);
+    command.args(args).current_dir(root);
+    if let Some(extra) = extra_path {
+        let path = std::env::var("PATH").unwrap_or_default();
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        command.env("PATH", format!("{extra}{sep}{path}"));
+    }
+    {
+        let ig = crate::scip_download::infigraph_dir();
+        let java_macos = ig.join("java").join("Contents").join("Home");
+        if java_macos.exists() {
+            command.env("JAVA_HOME", &java_macos);
+        } else {
+            let java_home = ig.join("java");
+            if java_home.join("bin").exists() {
+                command.env("JAVA_HOME", &java_home);
+            }
+        }
+        let dotnet_root = ig.join("dotnet");
+        if dotnet_root.exists() {
+            command.env("DOTNET_ROOT", &dotnet_root);
+        }
+    }
+    match command.status() {
+        Ok(s) if s.success() && scip_out.exists() => true,
+        Ok(s) => { eprintln!("Auto-SCIP: {label} exited with {s}"); false }
+        Err(e) => { eprintln!("Auto-SCIP: failed to run {label}: {e}"); false }
+    }
+}
+
+/// Entry point for the hidden `scip-enrich` subcommand (spawned by `index`).
+pub(crate) fn cmd_scip_enrich(root: &Path, detected_languages: &std::collections::HashSet<String>) {
+    auto_scip_background(root, detected_languages);
+}
+
+/// Background SCIP pipeline: download binaries, run indexers in parallel, import sequentially.
+fn auto_scip_background(root: &Path, detected_languages: &std::collections::HashSet<String>) {
+    use crate::scip_download;
+
+    let indexers = scip_download::indexers_for_languages(detected_languages);
+    if indexers.is_empty() { return; }
+
+    // Parallel download: ensure all indexer binaries are available
+    let binaries: Vec<_> = std::thread::scope(|s| {
+        let handles: Vec<_> = indexers.iter().map(|idx| {
+            s.spawn(move || (*idx, scip_download::ensure_indexer(idx)))
+        }).collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+
+    // Filter to runnable indexers and build per-indexer tasks
+    let scip_tmp = root.join(".infigraph").join("scip-tmp");
+    let _ = std::fs::create_dir_all(&scip_tmp);
+
+    let tasks: Vec<_> = binaries.into_iter().filter_map(|(indexer, bin_path)| {
+        let bin = bin_path?;
+        if !should_run_indexer(root, indexer) { return None; }
+        let output_path = scip_tmp.join(format!("{}.scip", indexer.binary_name));
+        Some((indexer, bin, output_path))
+    }).collect();
+
+    if tasks.is_empty() {
+        let _ = std::fs::remove_dir_all(&scip_tmp);
+        return;
+    }
+
+    // Part A: Run indexers in parallel with per-indexer output paths
+    let results: Vec<_> = std::thread::scope(|s| {
+        let handles: Vec<_> = tasks.iter().map(|(indexer, bin, output_path)| {
+            s.spawn(move || {
+                let success = run_scip_indexer_to(root, bin, indexer, output_path);
+                (indexer.binary_name, output_path.clone(), success)
+            })
+        }).collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+
+    // Part B: Import results sequentially (Kuzu graph is single-writer)
+    let registry = match bundled_registry() {
+        Ok(r) => r,
+        Err(e) => { eprintln!("Auto-SCIP: import failed: {e}"); return; }
+    };
+    let mut prism = match Infigraph::open(root, registry) {
+        Ok(p) => p,
+        Err(e) => { eprintln!("Auto-SCIP: import failed: {e}"); return; }
+    };
+    if prism.init().is_err() { return; }
+    let store = match prism.store() {
+        Some(s) => s,
+        None => return,
+    };
+
+    for (label, scip_path, success) in &results {
+        if *success && scip_path.exists() {
+            match infigraph_core::scip::import_scip_index(scip_path, store, Some(root)) {
+                Ok(stats) => eprintln!(
+                    "Auto-SCIP: {label} enriched {} symbols, {} added, {} references, {} new symbols, {} corrections learned",
+                    stats.symbols_enriched, stats.relations_added, stats.references_added, stats.symbols_added, stats.corrections_learned
+                ),
+                Err(e) => eprintln!("Auto-SCIP: {label} import failed: {e}"),
+            }
+        }
+        let _ = std::fs::remove_file(scip_path);
+    }
+
+    let _ = std::fs::remove_dir_all(&scip_tmp);
+
+    // Embed any new symbols SCIP added (skips existing embeddings)
+    let root_buf = root.to_path_buf();
+    let pre_count = infigraph_core::embed::embedding_count(&root_buf);
+    match infigraph_core::embed::update_embeddings(store, &root_buf, &[]) {
+        Ok(n) => {
+            let new = n.saturating_sub(pre_count);
+            if new > 0 {
+                eprintln!("Auto-SCIP: embedded {new} new symbols from SCIP enrichment");
+            }
+        }
+        Err(e) => eprintln!("Auto-SCIP: embedding update failed: {e}"),
+    }
+
+    eprintln!("Auto-SCIP: background enrichment complete.");
+}
+
+fn should_run_indexer(root: &Path, indexer: &crate::scip_download::ScipIndexer) -> bool {
+    if indexer.binary_name == "scip-clang" && !root.join("compile_commands.json").exists() {
+        eprintln!("Auto-SCIP: skipping scip-clang — compile_commands.json not found");
+        return false;
+    }
+    if indexer.binary_name == "scip-ruby" {
+        let has_gemspec = std::fs::read_dir(root)
+            .map(|entries| entries.filter_map(|e| e.ok())
+                .any(|e| e.path().extension().is_some_and(|ext| ext == "gemspec")))
+            .unwrap_or(false);
+        if !has_gemspec {
+            eprintln!("Auto-SCIP: skipping scip-ruby — no .gemspec found");
+            return false;
+        }
+    }
+    true
+}
+
+fn run_scip_indexer_to(
+    root: &Path,
+    bin: &Path,
+    indexer: &crate::scip_download::ScipIndexer,
+    output_path: &Path,
+) -> bool {
+    let label = indexer.binary_name;
+    eprintln!("Auto-SCIP: running {label}...");
+
+    let cmd_str = bin.to_string_lossy();
+    let extra = crate::scip_download::extra_runtime_paths();
+    let extra_path = if extra.is_empty() { None } else { Some(extra.as_str()) };
+
+    if indexer.binary_name == "scip-java" {
+        return run_scip_java(root, &cmd_str, output_path, extra_path);
+    }
+
+    run_scip_indexer_cmd(root, &cmd_str, indexer.scip_args, label, extra_path, indexer.output_flag, output_path)
+}
+
+fn run_scip_java(root: &Path, cmd: &str, output_path: &Path, extra_path: Option<&str>) -> bool {
+    let has_gradle = root.join("build.gradle").exists()
+        || root.join("build.gradle.kts").exists()
+        || root.join("settings.gradle").exists()
+        || root.join("settings.gradle.kts").exists();
+    let has_maven = root.join("pom.xml").exists();
+
+    if has_gradle && has_maven {
+        let primary = if root.join("settings.gradle").exists() || root.join("settings.gradle.kts").exists() {
+            "gradle"
+        } else {
+            "maven"
+        };
+        let fallback = if primary == "gradle" { "maven" } else { "gradle" };
+
+        eprintln!("Auto-SCIP: detected both Maven and Gradle, trying {primary}");
+        let primary_args: Vec<&str> = vec!["index", "--build-tool", primary];
+        if run_scip_indexer_cmd(root, cmd, &primary_args, "scip-java", extra_path, Some("--output"), output_path) {
+            return true;
+        }
+        eprintln!("Auto-SCIP: {primary} failed, falling back to {fallback}");
+        let fallback_args: Vec<&str> = vec!["index", "--build-tool", fallback];
+        return run_scip_indexer_cmd(root, cmd, &fallback_args, "scip-java", extra_path, Some("--output"), output_path);
+    }
+
+    run_scip_indexer_cmd(root, cmd, &["index"], "scip-java", extra_path, Some("--output"), output_path)
+}
+
+fn run_scip_indexer_cmd(
+    root: &Path,
+    cmd: &str,
+    args: &[&str],
+    label: &str,
+    extra_path: Option<&str>,
+    output_flag: Option<&str>,
+    output_path: &Path,
+) -> bool {
+    let mut command = std::process::Command::new(cmd);
+    command.args(args).current_dir(root);
+
+    if let Some(flag) = output_flag {
+        command.arg(flag).arg(output_path);
+    }
+
+    if let Some(extra) = extra_path {
+        let path = std::env::var("PATH").unwrap_or_default();
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        command.env("PATH", format!("{extra}{sep}{path}"));
+    }
+
+    {
+        let ig = crate::scip_download::infigraph_dir();
+        let java_macos = ig.join("java").join("Contents").join("Home");
+        if java_macos.exists() {
+            command.env("JAVA_HOME", &java_macos);
+        } else {
+            let java_home = ig.join("java");
+            if java_home.join("bin").exists() {
+                command.env("JAVA_HOME", &java_home);
+            }
+        }
+        let dotnet_root = ig.join("dotnet");
+        if dotnet_root.exists() {
+            command.env("DOTNET_ROOT", &dotnet_root);
+        }
+    }
+
+    match command.status() {
+        Ok(s) if s.success() => {
+            if output_flag.is_none() {
+                let default_out = root.join("index.scip");
+                if default_out.exists() && default_out != output_path {
+                    let _ = std::fs::rename(&default_out, output_path);
+                }
+            }
+            output_path.exists()
+        }
+        Ok(s) => { eprintln!("Auto-SCIP: {label} exited with {s}"); false }
+        Err(e) => { eprintln!("Auto-SCIP: failed to run {label}: {e}"); false }
+    }
 }

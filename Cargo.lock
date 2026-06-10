@@ -1573,6 +1573,7 @@ dependencies = [
  "infigraph-languages",
  "rayon",
  "serde_json",
+ "ureq",
 ]
 
 [[package]]
