@@ -5,15 +5,27 @@ AST-powered code intelligence engine. Indexes codebases into a persistent knowle
 Built in Rust. Zero LLM dependency. Runs locally.
 
 ## Key Highlights
-- **HTTP Route-Aware:** Maps your API surface across services. No decorator hunting.
-- **Multi-Repo/Microservice:** Understands dependencies across service boundaries.
-- **Semantic Search:** Finds "retry logic" even if the function isn't named retry.
+- **62 Languages:** Tree-sitter parsing for 62 languages + ANTLR grammar plugins for custom DSLs. Zero config.
+- **Graph Database:** Full Cypher queries on your codebase — WITH, OPTIONAL MATCH, variable-length paths.
+- **Semantic Search:** BM25 + Model2Vec hybrid search. Finds "retry logic" even if the function isn't named retry.
+- **SCIP Integration:** Auto-downloads compiler-grade indexers (TypeScript, Python, Java, Go, Rust, C#, Ruby, Scala). Falls back to lsp-to-scip bridge for 14+ more languages.
+- **Cross-File Resolution:** Import-aware call resolution links function calls to actual definitions across files.
+- **HTTP Route-Aware:** Maps your API surface across 22 frameworks (Flask, Express, Spring, Actix, Phoenix, Rails, etc.).
+- **Multi-Repo/Microservice:** Group repos, cross-repo Cypher queries, HTTP contract extraction, cross-service dependency detection.
+- **PR Review & CI:** Symbol-level diff review with optional LLM enrichment. Configurable CI check gates (security, complexity, dead code, vulns).
+- **OSV Vulnerability Scanning:** Scans dependencies against the OSV database for known vulnerabilities.
+- **Design Pattern Detection:** Identifies Singleton, Factory, Observer, Strategy, Builder, and other patterns.
 - **Refactor Analysis:** Complexity hotspots, coupling, near-duplicate detection, dead code — ranked by impact/effort.
+- **Document Indexing:** Index PDF, DOCX, PPTX, HTML, Markdown. Confluence wiki crawler with incremental sync.
 - **Auto-Watch:** File watcher auto-starts after indexing. Index stays fresh without manual intervention.
-- **HNSW Vector Index:** Approximate nearest neighbor search for fast similarity queries at scale.
+- **HNSW Vector Index:** Approximate nearest neighbor search for fast similarity queries at scale (~2ms for 500K symbols).
 - **Session Continuity:** Persists context across AI agent sessions — summary, pending tasks, decisions, touched files.
+- **69 MCP Tools:** Full AI agent integration for 11 coding agents (Claude Code, Cursor, VS Code, Copilot, Windsurf, etc.).
 - **Sequence Diagrams:** Auto-generates Mermaid sequence diagrams from call graphs.
 - **Cross-Language Detection:** Delphi↔COM, VB6↔COM, C#↔JNI, FFI, gRPC, WASM bridges.
+- **Grammar Plugins:** Drop `.g4` + `plugin.toml` — parse any custom/internal DSL without Rust compilation.
+- **Web UI:** Built-in graph explorer, search, route map at localhost:9749.
+- **Export:** Neo4j Cypher, GraphML, JSON — take your graph anywhere.
 
 ## Install
 
@@ -316,7 +328,7 @@ cargo build --release --target x86_64-apple-darwin -p infigraph-cli -p infigraph
 The `release.sh` script builds, signs, packages with the bundled model, and uploads to GHE releases:
 
 ```bash
-./release.sh v0.2.0
+./release.sh v1.0.0
 ```
 
 What it does:
