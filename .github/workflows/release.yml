@@ -26,9 +26,10 @@ jobs:
           # - os: ubuntu-latest
           #   target: x86_64-unknown-linux-gnu
           #   archive: tar.gz
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            archive: zip
+          # - os: windows-latest
+          #   target: x86_64-pc-windows-msvc
+          #   archive: zip
+          # disabled: esaxx-rs /MT vs lbug /MD CRT mismatch (LNK2038)
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
