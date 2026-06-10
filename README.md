@@ -60,6 +60,8 @@ infigraph update
 
 `infigraph update` re-registers MCP server paths and refreshes CLAUDE.md instructions.
 
+Infigraph also checks for updates in the background (once per 24h) and prints a hint when a newer version is available.
+
 ## Uninstall
 
 ```bash
@@ -74,7 +76,7 @@ Does NOT delete the binary — remove `~/.local/bin/infigraph` and `~/.local/bin
 
 ## How to Use
 
-Infigraph is designed to be used through AI coding agents (Claude Code, Cursor, Copilot, etc.) rather than directly from the CLI. After install, the MCP server provides 59 tools that any AI agent can call.
+Infigraph is designed to be used through AI coding agents (Claude Code, Cursor, Copilot, etc.) rather than directly from the CLI. After install, the MCP server provides 69 tools that any AI agent can call.
 
 ### With Claude Code (recommended)
 
@@ -333,9 +335,11 @@ After install, register Infigraph as the primary search engine for all AI coding
 infigraph install
 ```
 
-This does two things:
+This does four things:
 1. **Registers `infigraph-mcp`** as an MCP server for 11 agents: Claude Code, Cursor, VS Code, Codex, Gemini CLI, Zed, OpenCode, Aider, Windsurf, Kiro, GitHub Copilot
 2. **Writes primary search instructions** to `~/.claude/CLAUDE.md` so AI agents prefer Infigraph over raw grep/glob
+3. **Installs Claude Code hooks** — enforcement hook (warns on raw search) + session save hooks (auto-save context on compaction)
+4. **Configures Claude Code allowlist** — adds all Infigraph MCP tools to `~/.claude/settings.local.json` permissions
 
 Then index your projects:
 ```bash
@@ -403,20 +407,29 @@ Replace `/path/to/infigraph-mcp` with the output of `which infigraph-mcp`.
 - **Auto-watch** — file watcher auto-starts after indexing, keeps graph in sync via OS filesystem events with 500ms debounce
 - **Session continuity** — persists session context (summary, pending tasks, decisions, touched files) across AI agent sessions
 - **Docstring extraction** — captures docstrings/comments from AST, indexed for richer search
+- **Function signatures** — extracts parameter lists and return types from AST for richer embeddings and search
 - **Louvain community detection** — discovers functional modules/clusters in the call graph
 - **Multi-repo groups** — group microservice repos, cross-repo Cypher queries, HTTP contracts, cross-service dependency detection
+- **Custom edge types** — extensible relation system: language plugins can define custom edges (DECORATED_BY, SPAWNS, etc.) that persist in the graph
+- **Gitignore-aware** — respects `.gitignore` and `.infigraphignore` patterns during indexing via the `ignore` crate
+- **Learned resolution** — records successful cross-file call resolutions to improve accuracy on subsequent indexes
 
 ### Analysis
 - **Refactor analysis** — complexity hotspots, coupling (fan-in/fan-out), near-duplicate detection, dead code, file size — ranked by impact/effort
+- **PR review** — symbol-level diff review with optional LLM enrichment (Anthropic API), cross-repo blast radius
+- **CI check runner** — configurable checks (security, complexity, dead code, vuln scan) with pass/fail gates
+- **OSV vulnerability scanning** — scans dependencies against the OSV database for known vulnerabilities
+- **Design pattern detection** — identifies Singleton, Factory, Observer, Strategy, Builder, and other patterns
 - Dead code detection (uncalled functions/methods)
 - Transitive impact / blast radius analysis
 - Git diff → affected symbols mapping
 - Architecture overview (language breakdown, hotspots, hub functions, entry points)
 - HTTP route/endpoint detection across 22 languages (Flask, Express, Spring, Django, Gin, Actix, Phoenix, Rails, NestJS, and more)
 - Cross-service HTTP dependency detection (`group deps`) — scans URL strings, matches to contracts across repos
+- Bridge-to-call promotion — promotes detected cross-language bridges to CALLS edges for unified call graph analysis
 
 ### SCIP Integration (Compiler-grade Enrichment)
-Infigraph natively imports [SCIP](https://sourcegraph.com/blog/announcing-scip) indexes to enrich the graph with precise compiler-grade symbols, types, and cross-file relationships:
+Infigraph natively imports [SCIP](https://sourcegraph.com/blog/announcing-scip) indexes to enrich the graph with precise compiler-grade symbols, types, and cross-file relationships. SCIP indexers are **auto-downloaded** — `infigraph index` detects project languages and fetches the right indexer binaries (with portable runtimes for Node.js, JRE, .NET, Dart, PHP) on first use:
 
 ```bash
 # Generate SCIP index with an existing indexer
@@ -469,7 +482,7 @@ infigraph scip-import --index index.scip
 ```
 
 ### Integration
-- **59 MCP tools** for AI coding agents
+- **69 MCP tools** for AI coding agents
 - **11 agent auto-configs** — Claude Code, Cursor, VS Code, Codex, Gemini CLI, Zed, OpenCode, Aider, Windsurf, Kiro, GitHub Copilot
 - **Web UI** at localhost:9749 with graph explorer, search, route map, multi-repo groups, contracts
 - **Export** — Neo4j Cypher, GraphML, JSON
@@ -549,6 +562,25 @@ infigraph visualize
 # Import SCIP index (enriches graph with compiler-grade data)
 infigraph scip-import --index index.scip
 
+# PR review (symbol-level diff analysis)
+infigraph review
+
+# CI checks (security, complexity, dead code gates)
+infigraph check
+
+# Vulnerability scanning
+infigraph vulns
+
+# Design pattern detection
+infigraph detect-patterns
+
+# Document indexing (PDF, DOCX, Markdown, HTML)
+infigraph index-docs
+infigraph search-docs "deployment process"
+
+# Confluence wiki indexing
+infigraph index-confluence --base-url https://wiki.example.com --space PROJ
+
 # Multi-repo
 infigraph group create my-services
 infigraph group add my-services /path/to/service-a
@@ -570,7 +602,7 @@ infigraph-mcp --ui --port=9749
 # Open http://localhost:9749/?path=/your/project
 ```
 
-### 59 MCP Tools
+### 69 MCP Tools
 
 | Tool | Description |
 |------|-------------|
@@ -614,6 +646,18 @@ infigraph-mcp --ui --port=9749
 | `index_manifests` | Parse package manifests (package.json, Cargo.toml, go.mod, etc.) |
 | `get_dependencies` | List external dependencies by ecosystem |
 | `scip_import` | Import SCIP index for compiler-grade enrichment |
+| **Review & CI** | |
+| `review` | PR review — symbol-level diff analysis with optional LLM enrichment |
+| **Document Search** | |
+| `index_docs` | Index documents (PDF, DOCX, PPTX, Markdown, HTML) |
+| `reindex_docs` | Reindex all documents from scratch |
+| `clean_docs` | Remove document index |
+| `search_docs` | Search indexed documents with hybrid BM25+semantic |
+| `watch_docs` | Watch document directory for changes |
+| `stop_watch_docs` | Stop document watcher |
+| **Confluence** | |
+| `index_confluence` | Crawl and index Confluence wiki space |
+| `index_confluence_pages` | Index specific Confluence pages by ID |
 | **Multi-repo Groups** | |
 | `group_create` | Create a repo group |
 | `group_add` | Add repo to group |
@@ -662,16 +706,22 @@ infigraph/
 │   │       ├── routes/          # HTTP route detection (22 frameworks)
 │   │       ├── scip/            # SCIP index import (compiler-grade enrichment)
 │   │       ├── refactor/        # Refactoring analysis (complexity, coupling, clones, dead code)
-│   │       ├── watch/           # File watcher with auto-start after indexing
-│   │       ├── session/         # Session context persistence across AI sessions
+│   │       ├── watch/           # File watcher with auto-start after indexing + change batching
+│   │       ├── review/          # PR review engine with optional LLM enrichment
+│   │       ├── check/           # CI check runner (security, complexity, dead code gates)
+│   │       ├── vuln/            # OSV vulnerability scanning
+│   │       ├── patterns/        # Design pattern detection
+│   │       ├── learned/         # Learned resolution patterns for cross-file calls
 │   │       ├── viz/             # HTML graph visualization
 │   │       └── export/          # Cypher, GraphML, JSON export
+│   ├── infigraph-docs/          # Document indexing (PDF, DOCX, PPTX, HTML, Markdown)
+│   ├── infigraph-confluence/    # Confluence wiki crawler with incremental sync
 │   ├── infigraph-languages/     # 59 tree-sitter language packs
 │   │   └── languages/           # entities.scm + relations.scm per language
 │   ├── infigraph-grammar-plugin/   # Runtime ANTLR grammar plugin system (JVM subprocess)
 │   │   └── src/                 # Driver, config-driven extractor, plugin discovery
-│   ├── infigraph-cli/           # 40 CLI commands
-│   ├── infigraph-mcp/           # 59-tool MCP server + web UI
+│   ├── infigraph-cli/           # 50+ CLI commands
+│   ├── infigraph-mcp/           # 69-tool MCP server + web UI
 │   └── lsp-to-scip/             # Generic LSP → SCIP bridge binary
 ├── driver/                          # Java ANTLR grammar driver (JVM subprocess)
 │   ├── infigraph-driver.jar       # Fat jar (ANTLR4 runtime bundled)
@@ -688,11 +738,12 @@ infigraph/
 ## Graph Schema
 
 ### Nodes
-- **Symbol** — functions, methods, classes, structs, enums, variables, constants, tests, sections, routes
+- **Symbol** — functions, methods, classes, structs, enums, variables, constants, tests, sections, routes (with parameters, return_type, docstring, complexity)
 - **Module** — file-level grouping
 - **Cluster** — Louvain-detected community
 - **File** — source file
 - **Folder** — directory
+- **Dependency** — external package dependency (name, version, ecosystem, is_dev)
 
 ### Edges
 - **CALLS** — function/method call (cross-file resolved + SCIP-enriched)
@@ -704,9 +755,13 @@ infigraph/
 - **READS** / **WRITES** — variable access
 - **MEMBER_OF** — symbol belongs to cluster
 - **SIMILAR_TO** — semantic similarity (embedding-based)
+- **BRIDGE_TO** — cross-language bridge (FFI, JNI, gRPC, COM, WASM)
+- **CALLS_SERVICE** — cross-service HTTP call (with method, path, target_service)
+- **DEPENDS_ON** — module depends on external package
 - **DEFINES** — file defines symbol
 - **CONTAINS_FILE** — folder contains file
 - **CONTAINS_FOLDER** — folder contains subfolder
+- **Custom edges** — extensible via language plugins (DECORATED_BY, SPAWNS, etc.)
 
 ## Tech Stack
 
