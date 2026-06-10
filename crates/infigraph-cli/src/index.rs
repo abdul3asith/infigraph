@@ -88,10 +88,52 @@ pub(crate) fn cmd_index(root: &Path, full: bool, no_embed: bool) -> Result<()> {
         Err(e) => eprintln!("warning: document indexing failed: {e}"),
     }
 
-    // Auto-SCIP: detect languages and run available SCIP indexers
-    auto_scip(root, &result, prism.store())?;
+    // Drop prism to release the GraphStore handle before background SCIP
+    let detected_languages: std::collections::HashSet<String> = result.extractions.iter()
+        .map(|e| e.language.clone())
+        .collect();
+    drop(prism);
+
+    // SCIP enrichment in a detached child process — parent returns immediately.
+    spawn_scip_child_process(root, &detected_languages);
 
     Ok(())
+}
+
+fn spawn_scip_child_process(root: &Path, detected_languages: &std::collections::HashSet<String>) {
+    use crate::scip_download;
+
+    let indexers = scip_download::indexers_for_languages(detected_languages);
+    if indexers.is_empty() { return; }
+
+    let count = indexers.len();
+    let indexer_names: Vec<&str> = indexers.iter().map(|i| i.binary_name).collect();
+    println!("SCIP enrichment starting in background ({count} indexer(s): {})...", indexer_names.join(", "));
+
+    let langs: String = detected_languages.iter().cloned().collect::<Vec<_>>().join(",");
+
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    let log_path = root.join(".infigraph").join("scip-enrich.log");
+    let stderr_target = match std::fs::File::create(&log_path) {
+        Ok(f) => std::process::Stdio::from(f),
+        Err(_) => std::process::Stdio::null(),
+    };
+
+    let _ = std::process::Command::new(exe)
+        .arg("scip-enrich")
+        .arg("--languages")
+        .arg(&langs)
+        .current_dir(root)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(stderr_target)
+        .spawn();
+
+    eprintln!("  Log: {}", log_path.display());
 }
 
 pub(crate) fn on_path(cmd: &str) -> bool {

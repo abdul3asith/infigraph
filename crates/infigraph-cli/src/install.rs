@@ -72,11 +72,7 @@ pub(crate) fn cmd_install() -> Result<()> {
     if configured.is_empty() {
         println!("No agents were configured.");
     } else {
-        println!(
-            "\nInstalled infigraph MCP server for {} agent(s): {}",
-            configured.len(),
-            configured.join(", ")
-        );
+        print_capabilities_summary(&configured);
     }
 
     // Write primary search instructions to ~/.claude/CLAUDE.md
@@ -396,6 +392,163 @@ pub(crate) fn cmd_uninstall() -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn platform_triple() -> Result<(String, String, String)> {
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+    let os_tag = match os {
+        "macos" => "apple-darwin",
+        "linux" => "unknown-linux-gnu",
+        "windows" => "pc-windows-msvc",
+        _ => anyhow::bail!("unsupported OS: {os}"),
+    };
+    let arch_tag = match arch {
+        "x86_64" => "x86_64",
+        "aarch64" => "aarch64",
+        _ => anyhow::bail!("unsupported architecture: {arch}"),
+    };
+    let target = format!("{arch_tag}-{os_tag}");
+    Ok((os_tag.to_string(), arch_tag.to_string(), target))
+}
+
+pub(crate) fn self_update(version: &str) -> Result<()> {
+    let os = std::env::consts::OS;
+    let (_, _, target) = platform_triple()?;
+    let archive_ext = if os == "windows" { "zip" } else { "tar.gz" };
+    let asset_name = format!("infigraph-{target}.{archive_ext}");
+    let tag = format!("v{version}");
+
+    let gh_host =
+        std::env::var("INFIGRAPH_GH_HOST").unwrap_or_else(|_| "github.com".to_string());
+    let gh_owner =
+        std::env::var("INFIGRAPH_GH_OWNER").unwrap_or_else(|_| "intuit".to_string());
+    let gh_repo = "infigraph";
+    let full_repo = format!("{gh_host}/{gh_owner}/{gh_repo}");
+
+    println!("Downloading {asset_name} from release {tag}...");
+
+    let install_dir = std::env::var("INFIGRAPH_INSTALL_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".local").join("bin")
+        });
+
+    let tmp_dir = std::env::temp_dir();
+    let download_path = tmp_dir.join(&asset_name);
+
+    let mut gh_args = vec![
+        "release".to_string(), "download".to_string(), tag.clone(),
+        "--repo".to_string(), format!("{gh_owner}/{gh_repo}"),
+        "--pattern".to_string(), asset_name.clone(),
+        "--dir".to_string(), tmp_dir.to_string_lossy().to_string(),
+        "--clobber".to_string(),
+    ];
+    if gh_host != "github.com" {
+        gh_args.push("--hostname".to_string());
+        gh_args.push(gh_host.clone());
+    }
+
+    let status = std::process::Command::new("gh")
+        .args(&gh_args)
+        .status()
+        .context("failed to run `gh release download`")?;
+
+    if !status.success() {
+        anyhow::bail!("download failed for {asset_name} in release {tag} from {full_repo}");
+    }
+
+    std::fs::create_dir_all(&install_dir)?;
+
+    let bin_suffix = if os == "windows" { ".exe" } else { "" };
+    for bin in &["infigraph", "infigraph-mcp", "lsp-to-scip"] {
+        let bin_path = install_dir.join(format!("{bin}{bin_suffix}"));
+        let old_path = install_dir.join(format!("{bin}{bin_suffix}.old"));
+        if bin_path.exists() {
+            let _ = std::fs::remove_file(&old_path);
+            let _ = std::fs::rename(&bin_path, &old_path);
+        }
+    }
+
+    if archive_ext == "zip" {
+        let status = std::process::Command::new("unzip")
+            .args(["-o", &download_path.to_string_lossy(), "-d", &install_dir.to_string_lossy()])
+            .status()?;
+        if !status.success() {
+            anyhow::bail!("failed to extract zip");
+        }
+    } else {
+        let status = std::process::Command::new("tar")
+            .args(["-xzf", &download_path.to_string_lossy(), "-C", &install_dir.to_string_lossy()])
+            .status()?;
+        if !status.success() {
+            anyhow::bail!("failed to extract tar.gz");
+        }
+    }
+
+    let _ = std::fs::remove_file(&download_path);
+
+    for bin in &["infigraph", "infigraph-mcp", "lsp-to-scip"] {
+        let _ = std::fs::remove_file(install_dir.join(format!("{bin}{bin_suffix}.old")));
+    }
+
+    if os == "macos" {
+        for bin in &["infigraph", "infigraph-mcp", "lsp-to-scip"] {
+            let _ = std::process::Command::new("xattr")
+                .args(["-dr", "com.apple.quarantine", &install_dir.join(bin).to_string_lossy()])
+                .status();
+        }
+    }
+
+    if let Some(cache_path) = update_cache_path() {
+        let _ = std::fs::remove_file(&cache_path);
+    }
+
+    println!("Installed v{version} to {}", install_dir.display());
+    Ok(())
+}
+
+pub(crate) fn print_capabilities_summary(configured: &[&str]) {
+    let version = env!("CARGO_PKG_VERSION");
+    let count = configured.len();
+    let agents = configured.join(", ");
+
+    println!();
+    println!("Infigraph v{version} installed for {count} agent(s): {agents}");
+    println!();
+    println!("What you can do now:");
+    println!();
+    println!("  Index & Search");
+    println!("    infigraph index              Index your codebase (code + docs)");
+    println!("    infigraph search \"query\"      Hybrid BM25 + semantic search");
+    println!("    infigraph search-docs \"q\"     Search indexed documents");
+    println!();
+    println!("  Analysis");
+    println!("    infigraph dead-code          Find unreachable functions");
+    println!("    infigraph security           Scan for vulnerabilities (30+ patterns)");
+    println!("    infigraph complexity         Cyclomatic complexity hotspots");
+    println!("    infigraph check              CI quality gate (exit non-zero on violations)");
+    println!("    infigraph review             AI-powered PR review");
+    println!("    infigraph vulns              OSV vulnerability scanning");
+    println!();
+    println!("  Code Navigation");
+    println!("    infigraph impact <symbol>    Blast radius of a change");
+    println!("    infigraph routes             Detect HTTP/gRPC endpoints");
+    println!("    infigraph cluster            Detect functional modules");
+    println!("    infigraph architecture       Codebase overview");
+    println!("    infigraph refs <symbol>      Find all references");
+    println!();
+    println!("  Visualization");
+    println!("    infigraph visualize          Interactive graph in browser");
+    println!("    infigraph viz-sym <symbol>   Focused subgraph for one symbol");
+    println!();
+    println!("  Multi-Repo");
+    println!("    infigraph group create <name>  Create a service group");
+    println!("    infigraph group link           Link cross-service calls");
+    println!();
+    println!("  Get started:");
+    println!("    cd your-project && infigraph init");
+    println!();
+}
+
 pub(crate) fn update_cache_path() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".infigraph").join("update_check.json"))
 }
@@ -492,9 +645,26 @@ pub(crate) fn print_update_hint(handle: Option<std::thread::JoinHandle<()>>) {
 }
 
 pub(crate) fn cmd_update() -> Result<()> {
-    println!("Updating infigraph...");
-    println!("Downloading latest install script and running it.");
-    println!("This will fetch the latest binary and re-register MCP configs.\n");
+    let current = env!("CARGO_PKG_VERSION");
+
+    // Try direct binary download via gh release if a new version is available
+    if let Some(latest) = fetch_latest_version() {
+        if version_newer(&latest, current) {
+            println!("Updating infigraph: v{current} → v{latest}");
+            match self_update(&latest) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    eprintln!("Binary update failed ({e}), falling back to install script...");
+                }
+            }
+        } else {
+            println!("Already at latest version v{current}.");
+            return Ok(());
+        }
+    }
+
+    // Fallback: install script
+    println!("Downloading latest install script and running it.\n");
 
     let gh_host =
         std::env::var("INFIGRAPH_GH_HOST").unwrap_or_else(|_| "github.com".to_string());
