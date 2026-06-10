@@ -527,28 +527,38 @@ fn main() -> Result<()> {
         .stack_size(32 * 1024 * 1024)
         .build_global();
 
+    let update_handle = install::check_for_update_background();
+
     let cli = Cli::parse();
     let root = cli.root.unwrap_or_else(|| PathBuf::from("."));
 
-    match cli.command {
-        Commands::Init { group, quick, yes } => cmd_init(&root, group.as_deref(), quick, yes),
-        Commands::Index { full, no_embed } => cmd_index(&root, full, no_embed),
-        Commands::Stats => cmd_stats(&root),
-        Commands::Languages => cmd_languages(Some(&root)),
-        Commands::Symbols { file } => cmd_symbols(&root, &file),
-        Commands::Query { cypher } => cmd_query(&root, &cypher),
+    let result = run(cli.command, &root);
+
+    install::print_update_hint(update_handle);
+
+    result
+}
+
+fn run(command: Commands, root: &Path) -> Result<()> {
+    match command {
+        Commands::Init { group, quick, yes } => cmd_init(root, group.as_deref(), quick, yes),
+        Commands::Index { full, no_embed } => cmd_index(root, full, no_embed),
+        Commands::Stats => cmd_stats(root),
+        Commands::Languages => cmd_languages(Some(root)),
+        Commands::Symbols { file } => cmd_symbols(root, &file),
+        Commands::Query { cypher } => cmd_query(root, &cypher),
         Commands::Search {
             query,
             limit,
             alpha,
-        } => cmd_search(&root, &query, limit, alpha),
-        Commands::DeadCode => cmd_dead_code(&root),
-        Commands::Impact { symbol, depth } => cmd_impact(&root, &symbol, depth),
+        } => cmd_search(root, &query, limit, alpha),
+        Commands::DeadCode => cmd_dead_code(root),
+        Commands::Impact { symbol, depth } => cmd_impact(root, &symbol, depth),
         Commands::Install => cmd_install(),
         Commands::Uninstall => cmd_uninstall(),
         Commands::Bench { n } => {
             let registry = bundled_registry()?;
-            let mut prism = Infigraph::open(&root, registry)?;
+            let mut prism = Infigraph::open(root, registry)?;
             prism.init()?;
             let store = prism.store().context("not initialized")?;
             store.test_parquet_quality()?;
@@ -556,35 +566,35 @@ fn main() -> Result<()> {
         }
         Commands::BenchParquet => {
             let registry = bundled_registry()?;
-            let mut prism = Infigraph::open(&root, registry)?;
+            let mut prism = Infigraph::open(root, registry)?;
             prism.init()?;
             let store = prism.store().context("not initialized")?;
             store.benchmark_parquet_vs_csv()
         }
         Commands::Update => cmd_update(),
-        Commands::Group { action } => cmd_group(&root, action),
+        Commands::Group { action } => cmd_group(root, action),
         Commands::Repos => cmd_repos(),
         Commands::SearchCode {
             pattern,
             file_pattern,
             limit,
-        } => cmd_search_code(&root, &pattern, file_pattern.as_deref(), limit),
-        Commands::Snippet { symbol_id } => cmd_snippet(&root, &symbol_id),
-        Commands::Architecture => cmd_architecture(&root),
-        Commands::DetectChanges { base, depth } => cmd_detect_changes(&root, &base, depth),
-        Commands::Cluster => cmd_cluster(&root),
-        Commands::Export { format, output } => cmd_export(&root, &format, output),
-        Commands::Visualize => cmd_visualize(&root),
+        } => cmd_search_code(root, &pattern, file_pattern.as_deref(), limit),
+        Commands::Snippet { symbol_id } => cmd_snippet(root, &symbol_id),
+        Commands::Architecture => cmd_architecture(root),
+        Commands::DetectChanges { base, depth } => cmd_detect_changes(root, &base, depth),
+        Commands::Cluster => cmd_cluster(root),
+        Commands::Export { format, output } => cmd_export(root, &format, output),
+        Commands::Visualize => cmd_visualize(root),
         Commands::VisualizeSymbol { symbol_id, depth } => {
-            cmd_visualize_symbol(&root, &symbol_id, depth)
+            cmd_visualize_symbol(root, &symbol_id, depth)
         }
-        Commands::Routes => cmd_routes(&root),
-        Commands::ScipImport { index } => cmd_scip_import(&root, &index),
-        Commands::Watch { debounce } => cmd_watch(&root, debounce),
-        Commands::IndexDocs => cmd_index_docs(&root),
-        Commands::ReindexDocs => cmd_reindex_docs(&root),
-        Commands::CleanDocs => cmd_clean_docs(&root),
-        Commands::SearchDocs { query, limit } => cmd_search_docs(&root, &query, limit),
+        Commands::Routes => cmd_routes(root),
+        Commands::ScipImport { index } => cmd_scip_import(root, &index),
+        Commands::Watch { debounce } => cmd_watch(root, debounce),
+        Commands::IndexDocs => cmd_index_docs(root),
+        Commands::ReindexDocs => cmd_reindex_docs(root),
+        Commands::CleanDocs => cmd_clean_docs(root),
+        Commands::SearchDocs { query, limit } => cmd_search_docs(root, &query, limit),
         Commands::IndexConfluence {
             base_url,
             space,
@@ -596,7 +606,7 @@ fn main() -> Result<()> {
             follow_depth,
             max_pages,
         } => cmd_index_confluence(
-            &root,
+            root,
             &base_url,
             &space,
             page_ids,
@@ -607,33 +617,33 @@ fn main() -> Result<()> {
             follow_depth,
             max_pages,
         ),
-        Commands::IndexManifests => cmd_index_manifests(&root),
-        Commands::Dependencies { ecosystem } => cmd_dependencies(&root, ecosystem.as_deref()),
-        Commands::FindRefs { symbol } => cmd_find_refs(&root, &symbol),
-        Commands::ApiSurface { file } => cmd_api_surface(&root, file.as_deref()),
-        Commands::FileDeps { file } => cmd_file_deps(&root, &file),
-        Commands::TypeHierarchy { symbol, depth } => cmd_type_hierarchy(&root, &symbol, depth),
-        Commands::TestCoverage { file } => cmd_test_coverage(&root, file.as_deref()),
+        Commands::IndexManifests => cmd_index_manifests(root),
+        Commands::Dependencies { ecosystem } => cmd_dependencies(root, ecosystem.as_deref()),
+        Commands::FindRefs { symbol } => cmd_find_refs(root, &symbol),
+        Commands::ApiSurface { file } => cmd_api_surface(root, file.as_deref()),
+        Commands::FileDeps { file } => cmd_file_deps(root, &file),
+        Commands::TypeHierarchy { symbol, depth } => cmd_type_hierarchy(root, &symbol, depth),
+        Commands::TestCoverage { file } => cmd_test_coverage(root, file.as_deref()),
         Commands::Security { severity, category } => {
-            cmd_security(&root, severity.as_deref(), category.as_deref())
+            cmd_security(root, severity.as_deref(), category.as_deref())
         }
         Commands::Complexity { threshold, file } => {
-            cmd_complexity(&root, threshold, file.as_deref())
+            cmd_complexity(root, threshold, file.as_deref())
         }
-        Commands::SemanticDiff { old, new } => cmd_semantic_diff(&root, &old, &new),
-        Commands::Sequence { symbol_id, depth } => cmd_sequence(&root, &symbol_id, depth),
+        Commands::SemanticDiff { old, new } => cmd_semantic_diff(root, &old, &new),
+        Commands::Sequence { symbol_id, depth } => cmd_sequence(root, &symbol_id, depth),
         Commands::Refactor {
             target,
             focus,
             limit,
-        } => cmd_refactor(&root, target.as_deref(), &focus, limit),
+        } => cmd_refactor(root, target.as_deref(), &focus, limit),
         Commands::Check {
             config,
             json,
             checks,
         } => {
             let any_failed =
-                cmd_check(&root, config.as_deref(), json, checks.as_deref())?;
+                cmd_check(root, config.as_deref(), json, checks.as_deref())?;
             if any_failed {
                 std::process::exit(1);
             }
@@ -648,7 +658,7 @@ fn main() -> Result<()> {
             context,
             group,
         } => cmd_review(
-            &root,
+            root,
             &base,
             limit,
             json,
@@ -661,11 +671,11 @@ fn main() -> Result<()> {
             severity,
             ecosystem,
             json,
-        } => cmd_vulns(&root, severity.as_deref(), ecosystem.as_deref(), json),
-        Commands::Forget => cmd_forget(&root),
-        Commands::BridgesPromote => cmd_bridges_promote(&root),
+        } => cmd_vulns(root, severity.as_deref(), ecosystem.as_deref(), json),
+        Commands::Forget => cmd_forget(root),
+        Commands::BridgesPromote => cmd_bridges_promote(root),
         Commands::DetectPatterns { pattern, json } => {
-            cmd_detect_patterns(&root, pattern.as_deref(), json)
+            cmd_detect_patterns(root, pattern.as_deref(), json)
         }
         Commands::ScipEnrich { languages } => {
             let detected: std::collections::HashSet<String> = languages
@@ -673,7 +683,7 @@ fn main() -> Result<()> {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
-            index::cmd_scip_enrich(&root, &detected);
+            index::cmd_scip_enrich(root, &detected);
             Ok(())
         }
         Commands::CleanRuntimes => {
@@ -683,20 +693,20 @@ fn main() -> Result<()> {
         }
         Commands::BenchQuality { save } => {
             let registry = bundled_registry()?;
-            let mut prism = infigraph_core::Infigraph::open(&root, registry)?;
+            let mut prism = infigraph_core::Infigraph::open(root, registry)?;
             prism.init()?;
             let store = prism
                 .store()
                 .context("graph not initialized -- run 'infigraph index' first")?;
 
-            let current = infigraph_core::bench::QualityMetrics::capture(&root, store)?;
+            let current = infigraph_core::bench::QualityMetrics::capture(root, store)?;
 
             if save {
-                infigraph_core::bench::save_baseline(&root, &current)?;
+                infigraph_core::bench::save_baseline(root, &current)?;
                 println!("Baseline saved to .infigraph/quality_baseline.json");
                 println!("{}", current.format());
             } else {
-                match infigraph_core::bench::load_baseline(&root) {
+                match infigraph_core::bench::load_baseline(root) {
                     Some(baseline) => {
                         let results =
                             infigraph_core::bench::compare(&baseline.metrics, &current);

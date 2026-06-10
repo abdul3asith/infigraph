@@ -205,6 +205,10 @@ pub fn extract_entities(
                 _ => 1,
             };
 
+            let parameters = extract_child_text(node, "parameters", source);
+            let return_type = extract_child_text(node, "return_type", source)
+                .or_else(|| extract_child_text(node, "result", source));
+
             symbols.push(Symbol {
                 id,
                 name,
@@ -216,6 +220,8 @@ pub fn extract_entities(
                 visibility: None,
                 docstring,
                 complexity,
+                parameters,
+                return_type,
             });
         }
 
@@ -253,6 +259,8 @@ pub fn extract_entities(
                 visibility: None,
                 docstring,
                 complexity: 1,
+                parameters: None,
+                return_type: None,
             });
         }
     }
@@ -359,6 +367,12 @@ fn node_text(node: Node, source: &[u8]) -> String {
     node.utf8_text(source).unwrap_or("").to_string()
 }
 
+fn extract_child_text(node: Node, field_name: &str, source: &[u8]) -> Option<String> {
+    let child = node.child_by_field_name(field_name)?;
+    let text = child.utf8_text(source).ok()?.trim().to_string();
+    if text.is_empty() { None } else { Some(text) }
+}
+
 fn hash_node(node: Node, source: &[u8]) -> String {
     let mut hasher = Sha256::new();
     let text = &source[node.byte_range()];
@@ -446,5 +460,67 @@ mod tests {
         assert_eq!(symbols.len(), 1);
         assert_eq!(symbols[0].kind, crate::model::SymbolKind::Module);
         assert_eq!(symbols[0].name, "MyModule");
+    }
+
+    #[test]
+    fn test_python_function_extracts_parameters_and_return_type() {
+        let grammar = tree_sitter_python::LANGUAGE.into();
+        let src = b"def greet(name: str, age: int) -> str:\n    return f'hello {name}'\n";
+        let mut parser = Parser::new();
+        parser.set_language(&grammar).unwrap();
+        let tree = parser.parse(src, None).unwrap();
+        let root = tree.root_node();
+
+        let query = tree_sitter::Query::new(
+            &grammar,
+            "(function_definition name: (identifier) @func.name) @func.def",
+        )
+        .unwrap();
+
+        let symbols = extract_entities("greet.py", src, root, &query, "python");
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].name, "greet");
+        assert!(
+            symbols[0].parameters.is_some(),
+            "parameters should be extracted"
+        );
+        assert!(
+            symbols[0]
+                .parameters
+                .as_deref()
+                .unwrap()
+                .contains("name"),
+            "parameters should contain param names: {:?}",
+            symbols[0].parameters
+        );
+        assert!(
+            symbols[0].return_type.is_some(),
+            "return_type should be extracted for typed Python"
+        );
+        assert_eq!(symbols[0].return_type.as_deref(), Some("str"));
+    }
+
+    #[test]
+    fn test_python_function_no_return_type() {
+        let grammar = tree_sitter_python::LANGUAGE.into();
+        let src = b"def hello(x):\n    pass\n";
+        let mut parser = Parser::new();
+        parser.set_language(&grammar).unwrap();
+        let tree = parser.parse(src, None).unwrap();
+        let root = tree.root_node();
+
+        let query = tree_sitter::Query::new(
+            &grammar,
+            "(function_definition name: (identifier) @func.name) @func.def",
+        )
+        .unwrap();
+
+        let symbols = extract_entities("hello.py", src, root, &query, "python");
+        assert_eq!(symbols.len(), 1);
+        assert!(symbols[0].parameters.is_some());
+        assert!(
+            symbols[0].return_type.is_none(),
+            "no return type annotation"
+        );
     }
 }

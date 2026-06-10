@@ -71,6 +71,10 @@ pub struct Symbol {
     pub docstring: Option<String>,
     /// Cyclomatic complexity (1 = no branches; only set for Function/Method/Test)
     pub complexity: u32,
+    /// Function/method parameter list (raw text from AST)
+    pub parameters: Option<String>,
+    /// Return type annotation (raw text from AST)
+    pub return_type: Option<String>,
 }
 
 /// The kind of relationship between two symbols.

@@ -413,7 +413,7 @@ pub fn update_embeddings(
 
     let conn = store.connection()?;
     let gq = crate::graph::GraphQuery::new(&conn);
-    let rows = gq.raw_query("MATCH (s:Symbol) RETURN s.id, s.name, s.kind, s.file, s.docstring")?;
+    let rows = gq.raw_query("MATCH (s:Symbol) RETURN s.id, s.name, s.kind, s.file, s.docstring, s.language, s.parameters, s.return_type")?;
     if rows.is_empty() {
         return Ok(0);
     }
@@ -437,11 +437,10 @@ pub fn update_embeddings(
             let name = &row[1];
             let kind = &row[2];
             let doc = row.get(4).map(|s| s.as_str()).unwrap_or("");
-            let text = if doc.is_empty() {
-                format!("{} {}", kind, name)
-            } else {
-                format!("{} {}: {}", kind, name, doc)
-            };
+            let lang = row.get(5).map(|s| s.as_str()).unwrap_or("");
+            let params = row.get(6).map(|s| s.as_str()).unwrap_or("");
+            let ret = row.get(7).map(|s| s.as_str()).unwrap_or("");
+            let text = rich_symbol_text_full(kind, name, file, lang, doc, params, ret);
             Some((id.clone(), text))
         })
         .collect();

@@ -1,3 +1,8 @@
+pub const MIGRATIONS: &[&str] = &[
+    "ALTER TABLE Symbol ADD parameters STRING DEFAULT ''",
+    "ALTER TABLE Symbol ADD return_type STRING DEFAULT ''",
+];
+
 /// Kuzu schema DDL for the infigraph graph.
 pub const CREATE_SCHEMA: &[&str] = &[
     // Node tables
@@ -14,6 +19,8 @@ pub const CREATE_SCHEMA: &[&str] = &[
         parent STRING,
         docstring STRING,
         complexity INT32,
+        parameters STRING,
+        return_type STRING,
         embedding FLOAT[],
         PRIMARY KEY(id)
     )",
@@ -71,3 +78,23 @@ pub const CREATE_SCHEMA: &[&str] = &[
     "CREATE REL TABLE IF NOT EXISTS DEFINES(FROM File TO Symbol)",
     "CREATE REL TABLE IF NOT EXISTS CALLS_SERVICE(FROM Symbol TO Symbol, method STRING, path STRING, target_service STRING)",
 ];
+
+use kuzu::Connection;
+
+pub fn ensure_custom_edge_table(conn: &Connection<'_>, edge_name: &str) -> anyhow::Result<()> {
+    let ddl = format!(
+        "CREATE REL TABLE IF NOT EXISTS {}(FROM Symbol TO Symbol)",
+        edge_name
+    );
+    match conn.query(&ddl) {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            let msg = format!("{e}");
+            if msg.contains("already exists") {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!("failed to create custom edge table '{}': {}", edge_name, e))
+            }
+        }
+    }
+}

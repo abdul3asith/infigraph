@@ -135,6 +135,8 @@ impl GrammarPlugin {
                             visibility: None,
                             docstring: None,
                             complexity: 0,
+                            parameters: None,
+                            return_type: None,
                         })
                     })
                     .collect()

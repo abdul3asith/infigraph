@@ -8,7 +8,7 @@ use arrow::datatypes::DataType;
 use kuzu::{Connection, Database, SystemConfig};
 
 use super::parquet_loader;
-use super::schema::CREATE_SCHEMA;
+use super::schema::{CREATE_SCHEMA, MIGRATIONS};
 use crate::model::{FileExtraction, RelationKind};
 
 /// Persistent graph store backed by Kuzu.
@@ -34,6 +34,9 @@ impl GraphStore {
         for ddl in CREATE_SCHEMA {
             conn.query(ddl)
                 .map_err(|e| anyhow::anyhow!("schema error: {e}\n  DDL: {ddl}"))?;
+        }
+        for migration in MIGRATIONS {
+            let _ = conn.query(migration);
         }
         Ok(())
     }
@@ -117,7 +120,7 @@ impl GraphStore {
         if !extraction.symbols.is_empty() {
             let sym_rows: Vec<String> = extraction.symbols.iter().map(|sym| {
                 format!(
-                    "{{id: '{}', name: '{}', kind: '{}', file: '{}', start_line: {}, end_line: {}, signature_hash: '{}', language: '{}', visibility: '{}', parent: '{}', docstring: '{}', complexity: {}}}",
+                    "{{id: '{}', name: '{}', kind: '{}', file: '{}', start_line: {}, end_line: {}, signature_hash: '{}', language: '{}', visibility: '{}', parent: '{}', docstring: '{}', complexity: {}, parameters: '{}', return_type: '{}'}}",
                     escape(&sym.id),
                     escape(&sym.name),
                     sym.kind.as_str(),
@@ -130,10 +133,12 @@ impl GraphStore {
                     escape(sym.parent.as_deref().unwrap_or("")),
                     escape(sym.docstring.as_deref().unwrap_or("")),
                     sym.complexity,
+                    escape(sym.parameters.as_deref().unwrap_or("")),
+                    escape(sym.return_type.as_deref().unwrap_or("")),
                 )
             }).collect();
             let batch_insert = format!(
-                "UNWIND [{}] AS s CREATE (:Symbol {{id: s.id, name: s.name, kind: s.kind, file: s.file, start_line: s.start_line, end_line: s.end_line, signature_hash: s.signature_hash, language: s.language, visibility: s.visibility, parent: s.parent, docstring: s.docstring, complexity: s.complexity}})",
+                "UNWIND [{}] AS s CREATE (:Symbol {{id: s.id, name: s.name, kind: s.kind, file: s.file, start_line: s.start_line, end_line: s.end_line, signature_hash: s.signature_hash, language: s.language, visibility: s.visibility, parent: s.parent, docstring: s.docstring, complexity: s.complexity, parameters: s.parameters, return_type: s.return_type}})",
                 sym_rows.join(", ")
             );
             conn.query(&batch_insert)
@@ -168,8 +173,10 @@ impl GraphStore {
         let mut imports_pairs: Vec<(&str, &str)> = Vec::new();
         let mut reads_pairs: Vec<(&str, &str)> = Vec::new();
         let mut writes_pairs: Vec<(&str, &str)> = Vec::new();
+        let mut custom_pairs: std::collections::HashMap<String, Vec<(&str, &str)>> =
+            std::collections::HashMap::new();
         for rel in &extraction.relations {
-            match rel.kind {
+            match &rel.kind {
                 RelationKind::Calls | RelationKind::CalledBy => {
                     calls_pairs.push((&rel.source_id, &rel.target_id))
                 }
@@ -184,6 +191,12 @@ impl GraphStore {
                 }
                 RelationKind::Reads => reads_pairs.push((&rel.source_id, &rel.target_id)),
                 RelationKind::Writes => writes_pairs.push((&rel.source_id, &rel.target_id)),
+                RelationKind::Custom(name) => {
+                    custom_pairs
+                        .entry(name.clone())
+                        .or_default()
+                        .push((&rel.source_id, &rel.target_id));
+                }
                 _ => {}
             }
         }
@@ -216,6 +229,18 @@ impl GraphStore {
             let _ = conn.query(&format!(
                 "UNWIND [{}] AS p MATCH (a:Module), (b:Module) WHERE a.id = p.a AND b.id = p.b CREATE (a)-[:IMPORTS]->(b)",
                 pair_list.join(", ")
+            ));
+        }
+        for (edge_name, pairs) in &custom_pairs {
+            if pairs.is_empty() { continue; }
+            let _ = super::schema::ensure_custom_edge_table(conn, edge_name);
+            let pair_list: Vec<String> = pairs.iter()
+                .map(|(a, b)| format!("{{a: '{}', b: '{}'}}", escape(a), escape(b)))
+                .collect();
+            let _ = conn.query(&format!(
+                "UNWIND [{}] AS p MATCH (a:Symbol), (b:Symbol) WHERE a.id = p.a AND b.id = p.b CREATE (a)-[:{}]->(b)",
+                pair_list.join(", "),
+                edge_name
             ));
         }
 
@@ -273,17 +298,19 @@ impl GraphStore {
         const SYM_CHUNK: usize = 2000;
         let all_syms: Vec<String> = extractions.iter().flat_map(|e| {
             e.symbols.iter().map(move |sym| format!(
-                "{{id: '{}', name: '{}', kind: '{}', file: '{}', start_line: {}, end_line: {}, signature_hash: '{}', language: '{}', visibility: '{}', parent: '{}', docstring: '{}', complexity: {}}}",
+                "{{id: '{}', name: '{}', kind: '{}', file: '{}', start_line: {}, end_line: {}, signature_hash: '{}', language: '{}', visibility: '{}', parent: '{}', docstring: '{}', complexity: {}, parameters: '{}', return_type: '{}'}}",
                 escape(&sym.id), escape(&sym.name), sym.kind.as_str(), escape(&e.file),
                 sym.span.start_line, sym.span.end_line, escape(&sym.signature_hash),
                 escape(&sym.language), escape(sym.visibility.as_deref().unwrap_or("")),
                 escape(sym.parent.as_deref().unwrap_or("")),
-                escape(sym.docstring.as_deref().unwrap_or("")), sym.complexity
+                escape(sym.docstring.as_deref().unwrap_or("")), sym.complexity,
+                escape(sym.parameters.as_deref().unwrap_or("")),
+                escape(sym.return_type.as_deref().unwrap_or(""))
             ))
         }).collect();
         for chunk in all_syms.chunks(SYM_CHUNK) {
             conn.query(&format!(
-                "UNWIND [{}] AS s CREATE (:Symbol {{id: s.id, name: s.name, kind: s.kind, file: s.file, start_line: s.start_line, end_line: s.end_line, signature_hash: s.signature_hash, language: s.language, visibility: s.visibility, parent: s.parent, docstring: s.docstring, complexity: s.complexity}})",
+                "UNWIND [{}] AS s CREATE (:Symbol {{id: s.id, name: s.name, kind: s.kind, file: s.file, start_line: s.start_line, end_line: s.end_line, signature_hash: s.signature_hash, language: s.language, visibility: s.visibility, parent: s.parent, docstring: s.docstring, complexity: s.complexity, parameters: s.parameters, return_type: s.return_type}})",
                 chunk.join(", ")
             )).context("bulk symbol insert")?;
         }
@@ -327,6 +354,8 @@ impl GraphStore {
         let mut imports_pairs: Vec<String> = Vec::new();
         let mut reads_pairs: Vec<String> = Vec::new();
         let mut writes_pairs: Vec<String> = Vec::new();
+        let mut custom_pairs: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
         for e in extractions {
             for rel in &e.relations {
                 let pair = format!(
@@ -334,13 +363,16 @@ impl GraphStore {
                     escape(&rel.source_id),
                     escape(&rel.target_id)
                 );
-                match rel.kind {
+                match &rel.kind {
                     RelationKind::Calls | RelationKind::CalledBy => calls_pairs.push(pair),
                     RelationKind::Inherits | RelationKind::InheritedBy => inherits_pairs.push(pair),
                     RelationKind::TestedBy | RelationKind::Tests => tested_by_pairs.push(pair),
                     RelationKind::Imports | RelationKind::ImportedBy => imports_pairs.push(pair),
                     RelationKind::Reads => reads_pairs.push(pair),
                     RelationKind::Writes => writes_pairs.push(pair),
+                    RelationKind::Custom(name) => {
+                        custom_pairs.entry(name.clone()).or_default().push(pair);
+                    }
                     _ => {}
                 }
             }
@@ -364,6 +396,17 @@ impl GraphStore {
                 "UNWIND [{}] AS p MATCH (a:Module), (b:Module) WHERE a.id = p.a AND b.id = p.b CREATE (a)-[:IMPORTS]->(b)",
                 chunk.join(", ")
             ));
+        }
+        for (edge_name, pairs) in &custom_pairs {
+            if pairs.is_empty() { continue; }
+            let _ = super::schema::ensure_custom_edge_table(conn, edge_name);
+            for chunk in pairs.chunks(SYM_CHUNK) {
+                let _ = conn.query(&format!(
+                    "UNWIND [{}] AS p MATCH (a:Symbol), (b:Symbol) WHERE a.id = p.a AND b.id = p.b CREATE (a)-[:{}]->(b)",
+                    chunk.join(", "),
+                    edge_name
+                ));
+            }
         }
 
         Ok(())
@@ -1056,6 +1099,8 @@ impl GraphStore {
         let mut sym_parents = Vec::new();
         let mut sym_docstrings = Vec::new();
         let mut sym_complexities: Vec<i64> = Vec::new();
+        let mut sym_parameters = Vec::new();
+        let mut sym_return_types = Vec::new();
         let mut contains_pairs: Vec<(String, String)> = Vec::new();
         let mut defines_pairs: Vec<(String, String)> = Vec::new();
 
@@ -1077,6 +1122,10 @@ impl GraphStore {
         let mut imp_pairs: Vec<(String, String)> = Vec::new();
         let mut reads_pairs: Vec<(String, String)> = Vec::new();
         let mut writes_pairs: Vec<(String, String)> = Vec::new();
+        let mut custom_seen: std::collections::HashMap<String, std::collections::HashSet<(String, String)>> =
+            std::collections::HashMap::new();
+        let mut custom_pairs: std::collections::HashMap<String, Vec<(String, String)>> =
+            std::collections::HashMap::new();
 
         for e in extractions {
             let mod_name = e.file.rsplit_once('/').map(|(_, f)| f).unwrap_or(&e.file);
@@ -1107,6 +1156,8 @@ impl GraphStore {
                     sym_parents.push(sym.parent.as_deref().unwrap_or("").to_string());
                     sym_docstrings.push(sym.docstring.as_deref().unwrap_or("").to_string());
                     sym_complexities.push(sym.complexity as i64);
+                    sym_parameters.push(sym.parameters.as_deref().unwrap_or("").to_string());
+                    sym_return_types.push(sym.return_type.as_deref().unwrap_or("").to_string());
                     contains_pairs.push((e.file.clone(), sym.id.clone()));
                     defines_pairs.push((e.file.clone(), sym.id.clone()));
                 }
@@ -1115,7 +1166,7 @@ impl GraphStore {
             for rel in &e.relations {
                 let src = rel.source_id.clone();
                 let tgt = rel.target_id.clone();
-                match rel.kind {
+                match &rel.kind {
                     RelationKind::Imports | RelationKind::ImportedBy => {
                         if known_module_ids.contains(&src)
                             && known_module_ids.contains(&tgt)
@@ -1124,11 +1175,18 @@ impl GraphStore {
                             imp_pairs.push((src, tgt));
                         }
                     }
+                    RelationKind::Custom(name) => {
+                        if known_ids.contains(&src) && known_ids.contains(&tgt)
+                            && custom_seen.entry(name.clone()).or_default().insert((src.clone(), tgt.clone()))
+                        {
+                            custom_pairs.entry(name.clone()).or_default().push((src, tgt));
+                        }
+                    }
                     _ => {
                         if !known_ids.contains(&src) || !known_ids.contains(&tgt) {
                             continue;
                         }
-                        match rel.kind {
+                        match &rel.kind {
                             RelationKind::Calls | RelationKind::CalledBy
                                 if calls_seen.insert((src.clone(), tgt.clone())) =>
                             {
@@ -1218,6 +1276,8 @@ impl GraphStore {
                 ("parent", DataType::Utf8),
                 ("docstring", DataType::Utf8),
                 ("complexity", DataType::Int64),
+                ("parameters", DataType::Utf8),
+                ("return_type", DataType::Utf8),
             ],
             vec![
                 Arc::new(StringArray::from(sym_ids)),
@@ -1232,6 +1292,8 @@ impl GraphStore {
                 Arc::new(StringArray::from(sym_parents)),
                 Arc::new(StringArray::from(sym_docstrings)),
                 Arc::new(Int64Array::from(sym_complexities)),
+                Arc::new(StringArray::from(sym_parameters)),
+                Arc::new(StringArray::from(sym_return_types)),
             ],
         )?;
 
@@ -1241,7 +1303,7 @@ impl GraphStore {
         conn.query(&format!("COPY File FROM '{}'", fwd_slash_path(&file_pq)))
             .map_err(|e| anyhow::anyhow!("COPY File failed: {e}"))?;
         conn.query(&format!(
-            "COPY Symbol (id, name, kind, file, start_line, end_line, signature_hash, language, visibility, parent, docstring, complexity) FROM '{}'",
+            "COPY Symbol (id, name, kind, file, start_line, end_line, signature_hash, language, visibility, parent, docstring, complexity, parameters, return_type) FROM '{}'",
             fwd_slash_path(&sym_pq)
         )).map_err(|e| anyhow::anyhow!("COPY Symbol failed: {e}"))?;
 
@@ -1272,6 +1334,24 @@ impl GraphStore {
             {
                 eprintln!("warn: COPY {table} via parquet failed ({e}), falling back to UNWIND");
                 unwind_edges_from_pairs(&conn, &refs, table, src_label, dst_label);
+            }
+            let _ = std::fs::remove_file(&edge_pq);
+        }
+
+        // Custom edge tables
+        for (edge_name, pairs) in &custom_pairs {
+            if pairs.is_empty() { continue; }
+            let _ = super::schema::ensure_custom_edge_table(&conn, edge_name);
+            let edge_pq = tmp.join(format!("infigraph_index_{}.parquet", edge_name.to_lowercase()));
+            let refs: Vec<(&str, &str)> = pairs
+                .iter()
+                .map(|(a, b)| (a.as_str(), b.as_str()))
+                .collect();
+            parquet_loader::write_edge_parquet(&edge_pq, &refs)?;
+            if let Err(e) = conn.query(&format!("COPY {} FROM '{}'", edge_name, fwd_slash_path(&edge_pq)))
+            {
+                eprintln!("warn: COPY {} via parquet failed ({e}), falling back to UNWIND", edge_name);
+                unwind_edges_from_pairs(&conn, &refs, edge_name, "Symbol", "Symbol");
             }
             let _ = std::fs::remove_file(&edge_pq);
         }
