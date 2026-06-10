@@ -26,9 +26,7 @@ jobs:
     strategy:
       matrix:
         # os: [ubuntu-latest, macos-latest, windows-latest]
-        # windows-latest disabled: esaxx-rs builds C++ with /MT (static CRT)
-        # while lbug (KuzuDB) uses /MD (dynamic CRT), causing LNK2038 mismatch.
-        os: [macos-latest]
+        os: [macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -45,8 +43,7 @@ jobs:
     strategy:
       matrix:
         # os: [ubuntu-latest, macos-latest, windows-latest]
-        # windows-latest disabled: esaxx-rs /MT vs lbug /MD CRT mismatch (LNK2038)
-        os: [macos-latest]
+        os: [macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
