@@ -9,8 +9,8 @@ use std::path::Path;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::graph::GraphQuery;
 use crate::graph::store::GraphStore;
+use crate::graph::GraphQuery;
 use crate::security;
 
 // ---------------------------------------------------------------------------
@@ -159,12 +159,22 @@ pub struct CheckSelection {
 impl CheckSelection {
     /// All checks enabled.
     pub fn all() -> Self {
-        Self { security: true, complexity: true, dead_code: true, vulnerabilities: true }
+        Self {
+            security: true,
+            complexity: true,
+            dead_code: true,
+            vulnerabilities: true,
+        }
     }
 
     /// Parse a comma-separated list like "security,complexity,dead-code,vulns".
     pub fn from_csv(s: &str) -> Self {
-        let mut sel = Self { security: false, complexity: false, dead_code: false, vulnerabilities: false };
+        let mut sel = Self {
+            security: false,
+            complexity: false,
+            dead_code: false,
+            vulnerabilities: false,
+        };
         for part in s.split(',') {
             match part.trim().to_lowercase().as_str() {
                 "security" | "sec" => sel.security = true,
@@ -273,8 +283,7 @@ fn run_security_check(root: &Path, cfg: &SecurityConfig) -> CheckResult {
     let mut details = Vec::new();
     if failed {
         for f in scan.findings.iter().take(20) {
-            if f.severity == security::Severity::Critical
-                || f.severity == security::Severity::High
+            if f.severity == security::Severity::Critical || f.severity == security::Severity::High
             {
                 details.push(format!(
                     "  [{sev}] {file}:{line} -- {msg}",
@@ -289,7 +298,11 @@ fn run_security_check(root: &Path, cfg: &SecurityConfig) -> CheckResult {
 
     CheckResult {
         name: "security".into(),
-        status: if failed { CheckStatus::Fail } else { CheckStatus::Pass },
+        status: if failed {
+            CheckStatus::Fail
+        } else {
+            CheckStatus::Pass
+        },
         summary: format!(
             "{critical} critical, {high} high, {medium} medium, {low} low \
              (max_critical={}, max_high={})",
@@ -338,7 +351,11 @@ fn run_complexity_check(gq: &GraphQuery, cfg: &ComplexityConfig) -> CheckResult 
 
     CheckResult {
         name: "complexity".into(),
-        status: if failed { CheckStatus::Fail } else { CheckStatus::Pass },
+        status: if failed {
+            CheckStatus::Fail
+        } else {
+            CheckStatus::Pass
+        },
         summary: format!(
             "{count} symbols >= threshold {threshold} (max_violations={max})",
             threshold = cfg.threshold,
@@ -400,7 +417,11 @@ fn run_dead_code_check(gq: &GraphQuery, cfg: &DeadCodeConfig) -> CheckResult {
 
     CheckResult {
         name: "dead-code".into(),
-        status: if failed { CheckStatus::Fail } else { CheckStatus::Pass },
+        status: if failed {
+            CheckStatus::Fail
+        } else {
+            CheckStatus::Pass
+        },
         summary: format!("{count} dead symbols (max_dead={max})", max = cfg.max_dead),
         details,
     }
@@ -439,18 +460,41 @@ fn run_vuln_check(store: &GraphStore, cfg: &VulnCheckConfig) -> CheckResult {
         }
     };
 
-    let critical = report.findings.iter().filter(|f| f.severity == "CRITICAL").count();
-    let high = report.findings.iter().filter(|f| f.severity == "HIGH").count();
-    let medium = report.findings.iter().filter(|f| f.severity == "MEDIUM").count();
-    let low = report.findings.iter().filter(|f| f.severity == "LOW").count();
+    let critical = report
+        .findings
+        .iter()
+        .filter(|f| f.severity == "CRITICAL")
+        .count();
+    let high = report
+        .findings
+        .iter()
+        .filter(|f| f.severity == "HIGH")
+        .count();
+    let medium = report
+        .findings
+        .iter()
+        .filter(|f| f.severity == "MEDIUM")
+        .count();
+    let low = report
+        .findings
+        .iter()
+        .filter(|f| f.severity == "LOW")
+        .count();
 
     let failed = critical > cfg.max_critical || high > cfg.max_high;
 
     let details: Vec<String> = if failed {
-        report.findings.iter()
+        report
+            .findings
+            .iter()
             .filter(|f| f.severity == "CRITICAL" || f.severity == "HIGH")
             .take(20)
-            .map(|f| format!("  [{}] {} {} -- {}", f.severity, f.dep_name, f.dep_version, f.summary))
+            .map(|f| {
+                format!(
+                    "  [{}] {} {} -- {}",
+                    f.severity, f.dep_name, f.dep_version, f.summary
+                )
+            })
             .collect()
     } else {
         vec![]
@@ -483,7 +527,10 @@ pub fn format_table(results: &[CheckResult]) -> String {
             CheckStatus::Pass => "PASS",
             CheckStatus::Fail => "FAIL",
         };
-        out.push_str(&format!("  {:<13} {:<8} {}\n", r.name, status_str, r.summary));
+        out.push_str(&format!(
+            "  {:<13} {:<8} {}\n",
+            r.name, status_str, r.summary
+        ));
     }
 
     // Print details for failures.

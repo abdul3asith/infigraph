@@ -4,9 +4,7 @@ use std::path::Path;
 use anyhow::Result;
 use rayon::prelude::*;
 
-use infigraph_core::embed::{
-    doc_embedder, cosine_similarity, load_embeddings_cached, search_hnsw,
-};
+use infigraph_core::embed::{cosine_similarity, doc_embedder, load_embeddings_cached, search_hnsw};
 
 use crate::store::DocStore;
 
@@ -49,10 +47,7 @@ impl DocBM25Index {
             }
 
             for (term, tf) in tf_map {
-                inverted
-                    .entry(term.to_string())
-                    .or_default()
-                    .push((i, tf));
+                inverted.entry(term.to_string()).or_default().push((i, tf));
             }
         }
 
@@ -81,7 +76,8 @@ impl DocBM25Index {
 
                 for &(doc_idx, tf) in postings {
                     let doc_len = tokenize(&self.docs[doc_idx].1).len() as f32;
-                    let tf_norm = (tf * (K1 + 1.0)) / (tf + K1 * (1.0 - B + B * doc_len / self.avg_doc_len));
+                    let tf_norm =
+                        (tf * (K1 + 1.0)) / (tf + K1 * (1.0 - B + B * doc_len / self.avg_doc_len));
                     scores[doc_idx] += idf * tf_norm;
                 }
             }
@@ -153,10 +149,7 @@ pub fn hybrid_doc_search(
     };
 
     // Normalize vector
-    let max_vec = vector_scores
-        .values()
-        .cloned()
-        .fold(0.001f32, f32::max);
+    let max_vec = vector_scores.values().cloned().fold(0.001f32, f32::max);
 
     // Combine
     let mut all_indices: std::collections::HashSet<usize> = std::collections::HashSet::new();
@@ -214,10 +207,8 @@ fn brute_force_vector(
     limit: usize,
 ) -> Result<HashMap<usize, f32>> {
     let embeddings = load_embeddings_cached(emb_path).unwrap_or_default();
-    let emb_map: HashMap<&str, &Vec<f32>> = embeddings
-        .iter()
-        .map(|(id, v)| (id.as_str(), v))
-        .collect();
+    let emb_map: HashMap<&str, &Vec<f32>> =
+        embeddings.iter().map(|(id, v)| (id.as_str(), v)).collect();
 
     let id_to_idx: HashMap<&str, usize> = chunks
         .iter()

@@ -22,17 +22,24 @@ pub enum ChunkStrategy {
 impl ChunkStrategy {
     pub fn for_extension(ext: &str) -> Self {
         match ext {
-            "md" | "markdown" | "rst" | "adoc" | "org" | "html" | "htm"
-            | "xml" | "xsl" | "xsd" | "svg" | "plist" => Self::HeadingBounded,
+            "md" | "markdown" | "rst" | "adoc" | "org" | "html" | "htm" | "xml" | "xsl" | "xsd"
+            | "svg" | "plist" => Self::HeadingBounded,
             _ => Self::HeadingBounded,
         }
     }
 }
 
-pub fn chunk_document(doc: &ExtractedDoc, file: &str, hash: &str, strategy: ChunkStrategy) -> Vec<Chunk> {
+pub fn chunk_document(
+    doc: &ExtractedDoc,
+    file: &str,
+    hash: &str,
+    strategy: ChunkStrategy,
+) -> Vec<Chunk> {
     match strategy {
         ChunkStrategy::HeadingBounded => chunk_by_headings(doc, file, hash),
-        ChunkStrategy::FixedToken { size, overlap } => chunk_by_tokens(doc, file, hash, size, overlap),
+        ChunkStrategy::FixedToken { size, overlap } => {
+            chunk_by_tokens(doc, file, hash, size, overlap)
+        }
     }
 }
 
@@ -138,7 +145,8 @@ fn chunk_by_paragraphs(doc: &ExtractedDoc, file: &str, hash: &str) -> Vec<Chunk>
         return Vec::new();
     }
 
-    let paragraphs: Vec<&str> = text.split("\n\n")
+    let paragraphs: Vec<&str> = text
+        .split("\n\n")
         .map(|p| p.trim())
         .filter(|p| !p.is_empty())
         .collect();
@@ -198,7 +206,9 @@ fn chunk_by_paragraphs(doc: &ExtractedDoc, file: &str, hash: &str) -> Vec<Chunk>
                     page: None,
                 });
                 chunk_idx += 1;
-                if w_end >= words.len() { break; }
+                if w_end >= words.len() {
+                    break;
+                }
                 w_start = w_end - SUB_CHUNK_OVERLAP;
             }
             continue;
@@ -207,7 +217,8 @@ fn chunk_by_paragraphs(doc: &ExtractedDoc, file: &str, hash: &str) -> Vec<Chunk>
         // Adding this paragraph would exceed limit — flush current chunk
         if current_words + para_words > MAX_SECTION_TOKENS && !current_text.is_empty() {
             let trimmed = current_text.trim();
-            let start_offset = text[current_start..].find(trimmed)
+            let start_offset = text[current_start..]
+                .find(trimmed)
                 .map(|i| current_start + i)
                 .unwrap_or(current_start);
             chunks.push(Chunk {
@@ -241,7 +252,8 @@ fn chunk_by_paragraphs(doc: &ExtractedDoc, file: &str, hash: &str) -> Vec<Chunk>
     // Flush remaining
     if !current_text.is_empty() {
         let trimmed = current_text.trim();
-        let start_offset = text[current_start..].find(trimmed)
+        let start_offset = text[current_start..]
+            .find(trimmed)
             .map(|i| current_start + i)
             .unwrap_or(current_start);
         chunks.push(Chunk {
@@ -274,7 +286,13 @@ fn infer_heading(text: &str) -> Option<String> {
     }
 }
 
-fn chunk_by_tokens(doc: &ExtractedDoc, file: &str, hash: &str, size: usize, overlap: usize) -> Vec<Chunk> {
+fn chunk_by_tokens(
+    doc: &ExtractedDoc,
+    file: &str,
+    hash: &str,
+    size: usize,
+    overlap: usize,
+) -> Vec<Chunk> {
     let text = &doc.text;
     if text.is_empty() {
         return Vec::new();
@@ -302,7 +320,8 @@ fn chunk_by_tokens(doc: &ExtractedDoc, file: &str, hash: &str, size: usize, over
         let end_offset = if end >= words.len() {
             text.len()
         } else {
-            text.find(words[end.min(words.len() - 1)]).unwrap_or(text.len())
+            text.find(words[end.min(words.len() - 1)])
+                .unwrap_or(text.len())
         };
 
         if !chunk_text.is_empty() {

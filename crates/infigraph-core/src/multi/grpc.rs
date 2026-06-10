@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
-use crate::graph::GraphQuery;
 use crate::graph::store::GraphStore;
+use crate::graph::GraphQuery;
 
 /// Extract gRPC service contracts from .proto files in the graph.
 ///

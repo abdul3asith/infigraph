@@ -78,7 +78,13 @@ impl LanguagePack {
         relation_query_src: &str,
         custom_edges: Vec<CustomEdgeDef>,
     ) -> Result<Self> {
-        let mut pack = Self::new(name, extensions, grammar, entity_query_src, relation_query_src)?;
+        let mut pack = Self::new(
+            name,
+            extensions,
+            grammar,
+            entity_query_src,
+            relation_query_src,
+        )?;
         pack.custom_edges = custom_edges;
         Ok(pack)
     }

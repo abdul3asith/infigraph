@@ -88,17 +88,25 @@ pub(crate) fn cmd_init(root: &Path, group: Option<&str>, quick: bool, yes: bool)
         use infigraph_core::multi::Registry;
         let reg = Registry::load().unwrap_or_default();
         if let Some(g) = reg.groups.get(group_name) {
-            let repo_list: Vec<String> = g.repos.iter().map(|r| {
-                reg.repos.get(r)
-                    .map(|e| format!("- `{}` — {}", r, e.path.display()))
-                    .unwrap_or_else(|| format!("- `{}`", r))
-            }).collect();
+            let repo_list: Vec<String> = g
+                .repos
+                .iter()
+                .map(|r| {
+                    reg.repos
+                        .get(r)
+                        .map(|e| format!("- `{}` — {}", r, e.path.display()))
+                        .unwrap_or_else(|| format!("- `{}`", r))
+                })
+                .collect();
             Some(format!(
                 "\n## This Repo's Group: `{}`\n\nThis repo is part of the `{}` microservice group. Other repos in this group:\n{}\n\nUse `group_query` with group name `{}` to query across all repos.\nUse `group_sync` then `group_deps` to find cross-service HTTP dependencies.\n",
                 group_name, group_name, repo_list.join("\n"), group_name
             ))
         } else {
-            println!("  Warning: group '{}' not found in registry. Skipping group context.", group_name);
+            println!(
+                "  Warning: group '{}' not found in registry. Skipping group context.",
+                group_name
+            );
             None
         }
     } else {
@@ -322,15 +330,42 @@ pub(crate) fn wrap_kiro_rule(content: &str) -> String {
 }
 
 pub(crate) const AGENT_INSTRUCTION_TARGETS: &[AgentInstructionTarget] = &[
-    AgentInstructionTarget { path: ".cursor/rules/infigraph.mdc", wrapper: wrap_cursor_mdc, label: "Cursor" },
-    AgentInstructionTarget { path: ".github/copilot-instructions.md", wrapper: wrap_plain, label: "GitHub Copilot" },
-    AgentInstructionTarget { path: ".windsurf/rules/infigraph.md", wrapper: wrap_plain, label: "Windsurf" },
-    AgentInstructionTarget { path: ".kiro/rules/infigraph.md", wrapper: wrap_kiro_rule, label: "Kiro" },
-    AgentInstructionTarget { path: "AGENTS.md", wrapper: wrap_plain, label: "Codex/OpenAI" },
-    AgentInstructionTarget { path: "GEMINI.md", wrapper: wrap_plain, label: "Gemini CLI" },
+    AgentInstructionTarget {
+        path: ".cursor/rules/infigraph.mdc",
+        wrapper: wrap_cursor_mdc,
+        label: "Cursor",
+    },
+    AgentInstructionTarget {
+        path: ".github/copilot-instructions.md",
+        wrapper: wrap_plain,
+        label: "GitHub Copilot",
+    },
+    AgentInstructionTarget {
+        path: ".windsurf/rules/infigraph.md",
+        wrapper: wrap_plain,
+        label: "Windsurf",
+    },
+    AgentInstructionTarget {
+        path: ".kiro/rules/infigraph.md",
+        wrapper: wrap_kiro_rule,
+        label: "Kiro",
+    },
+    AgentInstructionTarget {
+        path: "AGENTS.md",
+        wrapper: wrap_plain,
+        label: "Codex/OpenAI",
+    },
+    AgentInstructionTarget {
+        path: "GEMINI.md",
+        wrapper: wrap_plain,
+        label: "Gemini CLI",
+    },
 ];
 
-pub(crate) fn write_agent_instructions(root: &std::path::Path, group_context: Option<&str>) -> Result<()> {
+pub(crate) fn write_agent_instructions(
+    root: &std::path::Path,
+    group_context: Option<&str>,
+) -> Result<()> {
     let base = infigraph_instructions();
     let instructions = match group_context {
         Some(ctx) => format!("{base}\n{ctx}"),
@@ -369,10 +404,7 @@ pub(crate) fn write_agent_instructions(root: &std::path::Path, group_context: Op
     }
 
     if !written.is_empty() {
-        println!(
-            "  Wrote agent instructions for: {}",
-            written.join(", ")
-        );
+        println!("  Wrote agent instructions for: {}", written.join(", "));
     }
 
     Ok(())

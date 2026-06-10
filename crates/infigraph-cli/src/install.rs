@@ -304,8 +304,12 @@ pub(crate) fn cmd_uninstall() -> Result<()> {
         };
 
         let result = match target.format {
-            ConfigFormat::Json => config_targets::uninstall_json_target(&config_path, target.label)?,
-            ConfigFormat::Toml => config_targets::uninstall_toml_target(&config_path, target.label)?,
+            ConfigFormat::Json => {
+                config_targets::uninstall_json_target(&config_path, target.label)?
+            }
+            ConfigFormat::Toml => {
+                config_targets::uninstall_toml_target(&config_path, target.label)?
+            }
         };
 
         if let Some(label) = result {
@@ -417,10 +421,8 @@ pub(crate) fn self_update(version: &str) -> Result<()> {
     let asset_name = format!("infigraph-{target}.{archive_ext}");
     let tag = format!("v{version}");
 
-    let gh_host =
-        std::env::var("INFIGRAPH_GH_HOST").unwrap_or_else(|_| "github.com".to_string());
-    let gh_owner =
-        std::env::var("INFIGRAPH_GH_OWNER").unwrap_or_else(|_| "intuit".to_string());
+    let gh_host = std::env::var("INFIGRAPH_GH_HOST").unwrap_or_else(|_| "github.com".to_string());
+    let gh_owner = std::env::var("INFIGRAPH_GH_OWNER").unwrap_or_else(|_| "intuit".to_string());
     let gh_repo = "infigraph";
     let full_repo = format!("{gh_host}/{gh_owner}/{gh_repo}");
 
@@ -429,17 +431,25 @@ pub(crate) fn self_update(version: &str) -> Result<()> {
     let install_dir = std::env::var("INFIGRAPH_INSTALL_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
-            dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".local").join("bin")
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".local")
+                .join("bin")
         });
 
     let tmp_dir = std::env::temp_dir();
     let download_path = tmp_dir.join(&asset_name);
 
     let mut gh_args = vec![
-        "release".to_string(), "download".to_string(), tag.clone(),
-        "--repo".to_string(), format!("{gh_owner}/{gh_repo}"),
-        "--pattern".to_string(), asset_name.clone(),
-        "--dir".to_string(), tmp_dir.to_string_lossy().to_string(),
+        "release".to_string(),
+        "download".to_string(),
+        tag.clone(),
+        "--repo".to_string(),
+        format!("{gh_owner}/{gh_repo}"),
+        "--pattern".to_string(),
+        asset_name.clone(),
+        "--dir".to_string(),
+        tmp_dir.to_string_lossy().to_string(),
         "--clobber".to_string(),
     ];
     if gh_host != "github.com" {
@@ -470,14 +480,24 @@ pub(crate) fn self_update(version: &str) -> Result<()> {
 
     if archive_ext == "zip" {
         let status = std::process::Command::new("unzip")
-            .args(["-o", &download_path.to_string_lossy(), "-d", &install_dir.to_string_lossy()])
+            .args([
+                "-o",
+                &download_path.to_string_lossy(),
+                "-d",
+                &install_dir.to_string_lossy(),
+            ])
             .status()?;
         if !status.success() {
             anyhow::bail!("failed to extract zip");
         }
     } else {
         let status = std::process::Command::new("tar")
-            .args(["-xzf", &download_path.to_string_lossy(), "-C", &install_dir.to_string_lossy()])
+            .args([
+                "-xzf",
+                &download_path.to_string_lossy(),
+                "-C",
+                &install_dir.to_string_lossy(),
+            ])
             .status()?;
         if !status.success() {
             anyhow::bail!("failed to extract tar.gz");
@@ -493,7 +513,11 @@ pub(crate) fn self_update(version: &str) -> Result<()> {
     if os == "macos" {
         for bin in &["infigraph", "infigraph-mcp", "lsp-to-scip"] {
             let _ = std::process::Command::new("xattr")
-                .args(["-dr", "com.apple.quarantine", &install_dir.join(bin).to_string_lossy()])
+                .args([
+                    "-dr",
+                    "com.apple.quarantine",
+                    &install_dir.join(bin).to_string_lossy(),
+                ])
                 .status();
         }
     }
@@ -554,10 +578,8 @@ pub(crate) fn update_cache_path() -> Option<PathBuf> {
 }
 
 pub(crate) fn fetch_latest_version() -> Option<String> {
-    let gh_host =
-        std::env::var("INFIGRAPH_GH_HOST").unwrap_or_else(|_| "github.com".to_string());
-    let gh_owner =
-        std::env::var("INFIGRAPH_GH_OWNER").unwrap_or_else(|_| "intuit".to_string());
+    let gh_host = std::env::var("INFIGRAPH_GH_HOST").unwrap_or_else(|_| "github.com".to_string());
+    let gh_owner = std::env::var("INFIGRAPH_GH_OWNER").unwrap_or_else(|_| "intuit".to_string());
     let gh_repo = "infigraph";
 
     let mut args = vec!["api"];
@@ -568,22 +590,21 @@ pub(crate) fn fetch_latest_version() -> Option<String> {
     args.push(&api_path);
     args.extend(["--jq", ".tag_name"]);
 
-    let output = std::process::Command::new("gh")
-        .args(&args)
-        .output()
-        .ok()?;
+    let output = std::process::Command::new("gh").args(&args).output().ok()?;
     if !output.status.success() {
         return None;
     }
     let tag = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let version = tag.strip_prefix('v').unwrap_or(&tag).to_string();
-    if version.is_empty() { None } else { Some(version) }
+    if version.is_empty() {
+        None
+    } else {
+        Some(version)
+    }
 }
 
 pub(crate) fn version_newer(latest: &str, current: &str) -> bool {
-    let parse = |s: &str| -> Vec<u32> {
-        s.split('.').filter_map(|p| p.parse().ok()).collect()
-    };
+    let parse = |s: &str| -> Vec<u32> { s.split('.').filter_map(|p| p.parse().ok()).collect() };
     parse(latest) > parse(current)
 }
 
@@ -605,7 +626,9 @@ pub(crate) fn check_for_update_background() -> Option<std::thread::JoinHandle<()
     }
 
     Some(std::thread::spawn(move || {
-        let Some(latest) = fetch_latest_version() else { return };
+        let Some(latest) = fetch_latest_version() else {
+            return;
+        };
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -618,7 +641,10 @@ pub(crate) fn check_for_update_background() -> Option<std::thread::JoinHandle<()
         if let Some(parent) = cache_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let _ = std::fs::write(&cache_path, serde_json::to_string(&cache).unwrap_or_default());
+        let _ = std::fs::write(
+            &cache_path,
+            serde_json::to_string(&cache).unwrap_or_default(),
+        );
     }))
 }
 
@@ -626,7 +652,9 @@ pub(crate) fn print_update_hint(handle: Option<std::thread::JoinHandle<()>>) {
     if let Some(h) = handle {
         let _ = h.join();
     }
-    let Some(cache_path) = update_cache_path() else { return };
+    let Some(cache_path) = update_cache_path() else {
+        return;
+    };
     let content = match std::fs::read_to_string(&cache_path) {
         Ok(c) => c,
         Err(_) => return,
@@ -635,7 +663,10 @@ pub(crate) fn print_update_hint(handle: Option<std::thread::JoinHandle<()>>) {
         Ok(v) => v,
         Err(_) => return,
     };
-    let latest = cached.get("latest_version").and_then(|v| v.as_str()).unwrap_or("");
+    let latest = cached
+        .get("latest_version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let current = env!("CARGO_PKG_VERSION");
     if version_newer(latest, current) {
         eprintln!(
@@ -666,10 +697,8 @@ pub(crate) fn cmd_update() -> Result<()> {
     // Fallback: install script
     println!("Downloading latest install script and running it.\n");
 
-    let gh_host =
-        std::env::var("INFIGRAPH_GH_HOST").unwrap_or_else(|_| "github.com".to_string());
-    let gh_owner =
-        std::env::var("INFIGRAPH_GH_OWNER").unwrap_or_else(|_| "intuit".to_string());
+    let gh_host = std::env::var("INFIGRAPH_GH_HOST").unwrap_or_else(|_| "github.com".to_string());
+    let gh_owner = std::env::var("INFIGRAPH_GH_OWNER").unwrap_or_else(|_| "intuit".to_string());
     let gh_repo = "infigraph";
 
     let is_ghe = gh_host != "github.com";

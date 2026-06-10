@@ -89,7 +89,9 @@ pub(crate) fn cmd_index(root: &Path, full: bool, no_embed: bool) -> Result<()> {
     }
 
     // Drop prism to release the GraphStore handle before background SCIP
-    let detected_languages: std::collections::HashSet<String> = result.extractions.iter()
+    let detected_languages: std::collections::HashSet<String> = result
+        .extractions
+        .iter()
         .map(|e| e.language.clone())
         .collect();
     drop(prism);
@@ -104,13 +106,22 @@ fn spawn_scip_child_process(root: &Path, detected_languages: &std::collections::
     use crate::scip_download;
 
     let indexers = scip_download::indexers_for_languages(detected_languages);
-    if indexers.is_empty() { return; }
+    if indexers.is_empty() {
+        return;
+    }
 
     let count = indexers.len();
     let indexer_names: Vec<&str> = indexers.iter().map(|i| i.binary_name).collect();
-    println!("SCIP enrichment starting in background ({count} indexer(s): {})...", indexer_names.join(", "));
+    println!(
+        "SCIP enrichment starting in background ({count} indexer(s): {})...",
+        indexer_names.join(", ")
+    );
 
-    let langs: String = detected_languages.iter().cloned().collect::<Vec<_>>().join(",");
+    let langs: String = detected_languages
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(",");
 
     let exe = match std::env::current_exe() {
         Ok(e) => e,
@@ -145,11 +156,17 @@ pub(crate) fn on_path(cmd: &str) -> bool {
         .unwrap_or(false)
 }
 
-pub(crate) fn import_scip_and_cleanup(root: &Path, scip_path: Option<&std::path::Path>, existing_store: Option<&infigraph_core::graph::GraphStore>) {
+pub(crate) fn import_scip_and_cleanup(
+    root: &Path,
+    scip_path: Option<&std::path::Path>,
+    existing_store: Option<&infigraph_core::graph::GraphStore>,
+) {
     let scip_out = scip_path
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| root.join("index.scip"));
-    if !scip_out.exists() { return; }
+    if !scip_out.exists() {
+        return;
+    }
 
     if let Some(store) = existing_store {
         match infigraph_core::scip::import_scip_index(&scip_out, store, Some(root)) {
@@ -195,36 +212,56 @@ pub(crate) fn import_scip_and_cleanup(root: &Path, scip_path: Option<&std::path:
 }
 
 /// Foreground SCIP execution using scip_download catalog for all detected languages.
-pub(crate) fn auto_scip(root: &Path, result: &infigraph_core::IndexResult, store: Option<&infigraph_core::graph::GraphStore>) -> Result<()> {
+pub(crate) fn auto_scip(
+    root: &Path,
+    result: &infigraph_core::IndexResult,
+    store: Option<&infigraph_core::graph::GraphStore>,
+) -> Result<()> {
     use crate::scip_download;
     use std::collections::HashSet;
 
-    let detected: HashSet<String> = result.extractions.iter()
+    let detected: HashSet<String> = result
+        .extractions
+        .iter()
         .map(|e| e.language.clone())
         .collect();
-    if detected.is_empty() { return Ok(()); }
+    if detected.is_empty() {
+        return Ok(());
+    }
 
     let indexers = scip_download::indexers_for_languages(&detected);
-    if indexers.is_empty() { return Ok(()); }
+    if indexers.is_empty() {
+        return Ok(());
+    }
 
-    println!("Auto-SCIP: found {} applicable indexer(s) for detected languages", indexers.len());
+    println!(
+        "Auto-SCIP: found {} applicable indexer(s) for detected languages",
+        indexers.len()
+    );
 
     // Parallel download: ensure all indexer binaries are available
     let binaries: Vec<_> = std::thread::scope(|s| {
-        let handles: Vec<_> = indexers.iter().map(|idx| {
-            s.spawn(move || (*idx, scip_download::ensure_indexer(idx)))
-        }).collect();
+        let handles: Vec<_> = indexers
+            .iter()
+            .map(|idx| s.spawn(move || (*idx, scip_download::ensure_indexer(idx))))
+            .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
     // Sequential run: each indexer produces index.scip, import, cleanup
     for (indexer, bin_path) in &binaries {
         let Some(bin) = bin_path else { continue };
-        if !should_run_indexer(root, indexer) { continue; }
+        if !should_run_indexer(root, indexer) {
+            continue;
+        }
 
         let cmd_str = bin.to_string_lossy();
         let extra = scip_download::extra_runtime_paths();
-        let extra_path = if extra.is_empty() { None } else { Some(extra.as_str()) };
+        let extra_path = if extra.is_empty() {
+            None
+        } else {
+            Some(extra.as_str())
+        };
 
         if indexer.binary_name == "scip-java" {
             let has_gradle = root.join("build.gradle").exists()
@@ -234,31 +271,61 @@ pub(crate) fn auto_scip(root: &Path, result: &infigraph_core::IndexResult, store
             let has_maven = root.join("pom.xml").exists();
 
             if has_gradle && has_maven {
-                let primary = if root.join("settings.gradle").exists() || root.join("settings.gradle.kts").exists() {
+                let primary = if root.join("settings.gradle").exists()
+                    || root.join("settings.gradle.kts").exists()
+                {
                     "gradle"
                 } else {
                     "maven"
                 };
-                let fallback = if primary == "gradle" { "maven" } else { "gradle" };
+                let fallback = if primary == "gradle" {
+                    "maven"
+                } else {
+                    "gradle"
+                };
 
                 println!("Auto-SCIP: detected both Maven and Gradle, trying {primary}");
                 let primary_args = ["index", "--build-tool", primary];
-                if run_scip_indexer(root, &cmd_str, &primary_args, indexer.binary_name, extra_path) {
+                if run_scip_indexer(
+                    root,
+                    &cmd_str,
+                    &primary_args,
+                    indexer.binary_name,
+                    extra_path,
+                ) {
                     import_scip_and_cleanup(root, None, store);
                 } else {
                     println!("Auto-SCIP: {primary} failed, falling back to {fallback}");
                     let fallback_args = ["index", "--build-tool", fallback];
-                    if run_scip_indexer(root, &cmd_str, &fallback_args, indexer.binary_name, extra_path) {
+                    if run_scip_indexer(
+                        root,
+                        &cmd_str,
+                        &fallback_args,
+                        indexer.binary_name,
+                        extra_path,
+                    ) {
                         import_scip_and_cleanup(root, None, store);
                     }
                 }
-            } else if run_scip_indexer(root, &cmd_str, indexer.scip_args, indexer.binary_name, extra_path) {
+            } else if run_scip_indexer(
+                root,
+                &cmd_str,
+                indexer.scip_args,
+                indexer.binary_name,
+                extra_path,
+            ) {
                 import_scip_and_cleanup(root, None, store);
             }
             continue;
         }
 
-        if run_scip_indexer(root, &cmd_str, indexer.scip_args, indexer.binary_name, extra_path) {
+        if run_scip_indexer(
+            root,
+            &cmd_str,
+            indexer.scip_args,
+            indexer.binary_name,
+            extra_path,
+        ) {
             import_scip_and_cleanup(root, None, store);
         }
     }
@@ -266,7 +333,13 @@ pub(crate) fn auto_scip(root: &Path, result: &infigraph_core::IndexResult, store
     Ok(())
 }
 
-pub(crate) fn run_scip_indexer(root: &Path, cmd: &str, args: &[&str], label: &str, extra_path: Option<&str>) -> bool {
+pub(crate) fn run_scip_indexer(
+    root: &Path,
+    cmd: &str,
+    args: &[&str],
+    label: &str,
+    extra_path: Option<&str>,
+) -> bool {
     println!("Auto-SCIP: running {label}...");
     let scip_out = root.join("index.scip");
     let mut command = std::process::Command::new(cmd);
@@ -294,8 +367,14 @@ pub(crate) fn run_scip_indexer(root: &Path, cmd: &str, args: &[&str], label: &st
     }
     match command.status() {
         Ok(s) if s.success() && scip_out.exists() => true,
-        Ok(s) => { eprintln!("Auto-SCIP: {label} exited with {s}"); false }
-        Err(e) => { eprintln!("Auto-SCIP: failed to run {label}: {e}"); false }
+        Ok(s) => {
+            eprintln!("Auto-SCIP: {label} exited with {s}");
+            false
+        }
+        Err(e) => {
+            eprintln!("Auto-SCIP: failed to run {label}: {e}");
+            false
+        }
     }
 }
 
@@ -309,13 +388,16 @@ fn auto_scip_background(root: &Path, detected_languages: &std::collections::Hash
     use crate::scip_download;
 
     let indexers = scip_download::indexers_for_languages(detected_languages);
-    if indexers.is_empty() { return; }
+    if indexers.is_empty() {
+        return;
+    }
 
     // Parallel download: ensure all indexer binaries are available
     let binaries: Vec<_> = std::thread::scope(|s| {
-        let handles: Vec<_> = indexers.iter().map(|idx| {
-            s.spawn(move || (*idx, scip_download::ensure_indexer(idx)))
-        }).collect();
+        let handles: Vec<_> = indexers
+            .iter()
+            .map(|idx| s.spawn(move || (*idx, scip_download::ensure_indexer(idx))))
+            .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
@@ -323,12 +405,17 @@ fn auto_scip_background(root: &Path, detected_languages: &std::collections::Hash
     let scip_tmp = root.join(".infigraph").join("scip-tmp");
     let _ = std::fs::create_dir_all(&scip_tmp);
 
-    let tasks: Vec<_> = binaries.into_iter().filter_map(|(indexer, bin_path)| {
-        let bin = bin_path?;
-        if !should_run_indexer(root, indexer) { return None; }
-        let output_path = scip_tmp.join(format!("{}.scip", indexer.binary_name));
-        Some((indexer, bin, output_path))
-    }).collect();
+    let tasks: Vec<_> = binaries
+        .into_iter()
+        .filter_map(|(indexer, bin_path)| {
+            let bin = bin_path?;
+            if !should_run_indexer(root, indexer) {
+                return None;
+            }
+            let output_path = scip_tmp.join(format!("{}.scip", indexer.binary_name));
+            Some((indexer, bin, output_path))
+        })
+        .collect();
 
     if tasks.is_empty() {
         let _ = std::fs::remove_dir_all(&scip_tmp);
@@ -337,25 +424,36 @@ fn auto_scip_background(root: &Path, detected_languages: &std::collections::Hash
 
     // Part A: Run indexers in parallel with per-indexer output paths
     let results: Vec<_> = std::thread::scope(|s| {
-        let handles: Vec<_> = tasks.iter().map(|(indexer, bin, output_path)| {
-            s.spawn(move || {
-                let success = run_scip_indexer_to(root, bin, indexer, output_path);
-                (indexer.binary_name, output_path.clone(), success)
+        let handles: Vec<_> = tasks
+            .iter()
+            .map(|(indexer, bin, output_path)| {
+                s.spawn(move || {
+                    let success = run_scip_indexer_to(root, bin, indexer, output_path);
+                    (indexer.binary_name, output_path.clone(), success)
+                })
             })
-        }).collect();
+            .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
     // Part B: Import results sequentially (Kuzu graph is single-writer)
     let registry = match bundled_registry() {
         Ok(r) => r,
-        Err(e) => { eprintln!("Auto-SCIP: import failed: {e}"); return; }
+        Err(e) => {
+            eprintln!("Auto-SCIP: import failed: {e}");
+            return;
+        }
     };
     let mut prism = match Infigraph::open(root, registry) {
         Ok(p) => p,
-        Err(e) => { eprintln!("Auto-SCIP: import failed: {e}"); return; }
+        Err(e) => {
+            eprintln!("Auto-SCIP: import failed: {e}");
+            return;
+        }
     };
-    if prism.init().is_err() { return; }
+    if prism.init().is_err() {
+        return;
+    }
     let store = match prism.store() {
         Some(s) => s,
         None => return,
@@ -399,8 +497,11 @@ fn should_run_indexer(root: &Path, indexer: &crate::scip_download::ScipIndexer) 
     }
     if indexer.binary_name == "scip-ruby" {
         let has_gemspec = std::fs::read_dir(root)
-            .map(|entries| entries.filter_map(|e| e.ok())
-                .any(|e| e.path().extension().is_some_and(|ext| ext == "gemspec")))
+            .map(|entries| {
+                entries
+                    .filter_map(|e| e.ok())
+                    .any(|e| e.path().extension().is_some_and(|ext| ext == "gemspec"))
+            })
             .unwrap_or(false);
         if !has_gemspec {
             eprintln!("Auto-SCIP: skipping scip-ruby — no .gemspec found");
@@ -421,13 +522,25 @@ fn run_scip_indexer_to(
 
     let cmd_str = bin.to_string_lossy();
     let extra = crate::scip_download::extra_runtime_paths();
-    let extra_path = if extra.is_empty() { None } else { Some(extra.as_str()) };
+    let extra_path = if extra.is_empty() {
+        None
+    } else {
+        Some(extra.as_str())
+    };
 
     if indexer.binary_name == "scip-java" {
         return run_scip_java(root, &cmd_str, output_path, extra_path);
     }
 
-    run_scip_indexer_cmd(root, &cmd_str, indexer.scip_args, label, extra_path, indexer.output_flag, output_path)
+    run_scip_indexer_cmd(
+        root,
+        &cmd_str,
+        indexer.scip_args,
+        label,
+        extra_path,
+        indexer.output_flag,
+        output_path,
+    )
 }
 
 fn run_scip_java(root: &Path, cmd: &str, output_path: &Path, extra_path: Option<&str>) -> bool {
@@ -438,24 +551,53 @@ fn run_scip_java(root: &Path, cmd: &str, output_path: &Path, extra_path: Option<
     let has_maven = root.join("pom.xml").exists();
 
     if has_gradle && has_maven {
-        let primary = if root.join("settings.gradle").exists() || root.join("settings.gradle.kts").exists() {
-            "gradle"
-        } else {
+        let primary =
+            if root.join("settings.gradle").exists() || root.join("settings.gradle.kts").exists() {
+                "gradle"
+            } else {
+                "maven"
+            };
+        let fallback = if primary == "gradle" {
             "maven"
+        } else {
+            "gradle"
         };
-        let fallback = if primary == "gradle" { "maven" } else { "gradle" };
 
         eprintln!("Auto-SCIP: detected both Maven and Gradle, trying {primary}");
         let primary_args: Vec<&str> = vec!["index", "--build-tool", primary];
-        if run_scip_indexer_cmd(root, cmd, &primary_args, "scip-java", extra_path, Some("--output"), output_path) {
+        if run_scip_indexer_cmd(
+            root,
+            cmd,
+            &primary_args,
+            "scip-java",
+            extra_path,
+            Some("--output"),
+            output_path,
+        ) {
             return true;
         }
         eprintln!("Auto-SCIP: {primary} failed, falling back to {fallback}");
         let fallback_args: Vec<&str> = vec!["index", "--build-tool", fallback];
-        return run_scip_indexer_cmd(root, cmd, &fallback_args, "scip-java", extra_path, Some("--output"), output_path);
+        return run_scip_indexer_cmd(
+            root,
+            cmd,
+            &fallback_args,
+            "scip-java",
+            extra_path,
+            Some("--output"),
+            output_path,
+        );
     }
 
-    run_scip_indexer_cmd(root, cmd, &["index"], "scip-java", extra_path, Some("--output"), output_path)
+    run_scip_indexer_cmd(
+        root,
+        cmd,
+        &["index"],
+        "scip-java",
+        extra_path,
+        Some("--output"),
+        output_path,
+    )
 }
 
 fn run_scip_indexer_cmd(
@@ -507,7 +649,13 @@ fn run_scip_indexer_cmd(
             }
             output_path.exists()
         }
-        Ok(s) => { eprintln!("Auto-SCIP: {label} exited with {s}"); false }
-        Err(e) => { eprintln!("Auto-SCIP: failed to run {label}: {e}"); false }
+        Ok(s) => {
+            eprintln!("Auto-SCIP: {label} exited with {s}");
+            false
+        }
+        Err(e) => {
+            eprintln!("Auto-SCIP: failed to run {label}: {e}");
+            false
+        }
     }
 }

@@ -93,7 +93,11 @@ pub fn ensure_custom_edge_table(conn: &Connection<'_>, edge_name: &str) -> anyho
             if msg.contains("already exists") {
                 Ok(())
             } else {
-                Err(anyhow::anyhow!("failed to create custom edge table '{}': {}", edge_name, e))
+                Err(anyhow::anyhow!(
+                    "failed to create custom edge table '{}': {}",
+                    edge_name,
+                    e
+                ))
             }
         }
     }

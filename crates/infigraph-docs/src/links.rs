@@ -12,11 +12,7 @@ struct DocLink {
     target_doc_id: Option<String>,
 }
 
-pub fn extract_and_link_doc(
-    store: &DocStore,
-    doc: &ExtractedDoc,
-    all_doc_ids: &HashSet<String>,
-) {
+pub fn extract_and_link_doc(store: &DocStore, doc: &ExtractedDoc, all_doc_ids: &HashSet<String>) {
     let links = extract_links(&doc.text, &doc.file);
     if links.is_empty() {
         return;
@@ -128,7 +124,9 @@ fn resolve_relative_path(url: &str, doc_file: &str) -> String {
     for component in full.split('/') {
         match component {
             "" | "." => {}
-            ".." => { parts.pop(); }
+            ".." => {
+                parts.pop();
+            }
             other => parts.push(other),
         }
     }

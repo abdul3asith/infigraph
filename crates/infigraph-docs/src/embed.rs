@@ -5,7 +5,7 @@ use anyhow::Result;
 use rayon::prelude::*;
 
 use infigraph_core::embed::{
-    doc_embedder, build_hnsw_index, invalidate_embeddings_cache, invalidate_hnsw_cache,
+    build_hnsw_index, doc_embedder, invalidate_embeddings_cache, invalidate_hnsw_cache,
     load_embeddings, save_embeddings,
 };
 
@@ -21,11 +21,10 @@ pub fn update_doc_embeddings(
     let tg_dir = root.join(".infigraph");
     let emb_path = tg_dir.join("docs_embeddings.bin");
 
-    let mut existing: std::collections::HashMap<String, Vec<f32>> =
-        load_embeddings(&emb_path)
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
+    let mut existing: std::collections::HashMap<String, Vec<f32>> = load_embeddings(&emb_path)
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
 
     let changed_set: std::collections::HashSet<&str> = changed_files.iter().copied().collect();
 
@@ -106,13 +105,20 @@ fn doc_path_context(file: &str) -> Option<String> {
     if parts.len() <= 1 {
         return None;
     }
-    let stem = parts.last()?
-        .rsplit_once('.').map(|(s, _)| s).unwrap_or(parts.last()?);
+    let stem = parts
+        .last()?
+        .rsplit_once('.')
+        .map(|(s, _)| s)
+        .unwrap_or(parts.last()?);
     let name = stem.replace(['_', '-'], " ");
-    let dirs: Vec<&str> = parts[..parts.len()-1].iter()
+    let dirs: Vec<&str> = parts[..parts.len() - 1]
+        .iter()
         .filter(|p| {
             let lower = p.to_lowercase();
-            !matches!(lower.as_str(), "src" | "doc" | "docs" | "documentation" | "resources")
+            !matches!(
+                lower.as_str(),
+                "src" | "doc" | "docs" | "documentation" | "resources"
+            )
         })
         .copied()
         .collect();

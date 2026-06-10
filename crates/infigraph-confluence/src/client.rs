@@ -91,7 +91,8 @@ impl ConfluenceClient {
             "{}/wiki/rest/api/content/{}?expand=body.view,body.storage,version",
             self.base_url, page_id
         );
-        let resp: ConfluencePage = self.agent
+        let resp: ConfluencePage = self
+            .agent
             .get(&url)
             .set("Authorization", &self.auth_header)
             .call()
@@ -109,7 +110,8 @@ impl ConfluenceClient {
                 "{}/wiki/rest/api/content?spaceKey={}&type=page&expand=body.view,version&limit={}&start={}",
                 self.base_url, space_key, limit.min(50), start
             );
-            let resp: SearchResponse = self.agent
+            let resp: SearchResponse = self
+                .agent
                 .get(&url)
                 .set("Authorization", &self.auth_header)
                 .call()
@@ -120,7 +122,8 @@ impl ConfluenceClient {
             let count = resp.results.len();
             all_pages.extend(resp.results);
 
-            if count == 0 || all_pages.len() >= limit || resp._links.and_then(|l| l.next).is_none() {
+            if count == 0 || all_pages.len() >= limit || resp._links.and_then(|l| l.next).is_none()
+            {
                 break;
             }
             start += count;
@@ -139,7 +142,8 @@ impl ConfluenceClient {
                 limit.min(50),
                 start
             );
-            let resp: SearchResponse = self.agent
+            let resp: SearchResponse = self
+                .agent
                 .get(&url)
                 .set("Authorization", &self.auth_header)
                 .call()
@@ -150,7 +154,8 @@ impl ConfluenceClient {
             let count = resp.results.len();
             all_pages.extend(resp.results);
 
-            if count == 0 || all_pages.len() >= limit || resp._links.and_then(|l| l.next).is_none() {
+            if count == 0 || all_pages.len() >= limit || resp._links.and_then(|l| l.next).is_none()
+            {
                 break;
             }
             start += count;
@@ -158,8 +163,16 @@ impl ConfluenceClient {
         Ok(all_pages)
     }
 
-    pub fn get_pages_modified_since(&self, space_key: &str, since: &str, limit: usize) -> Result<Vec<ConfluencePage>> {
-        let cql = format!("space = \"{}\" AND type = page AND lastModified >= \"{}\"", space_key, since);
+    pub fn get_pages_modified_since(
+        &self,
+        space_key: &str,
+        since: &str,
+        limit: usize,
+    ) -> Result<Vec<ConfluencePage>> {
+        let cql = format!(
+            "space = \"{}\" AND type = page AND lastModified >= \"{}\"",
+            space_key, since
+        );
         self.search_cql(&cql, limit)
     }
 
@@ -171,7 +184,8 @@ impl ConfluenceClient {
                 "{}/wiki/rest/api/content?spaceKey={}&type=page&limit=200&start={}",
                 self.base_url, space_key, start
             );
-            let resp: SearchResponse = self.agent
+            let resp: SearchResponse = self
+                .agent
                 .get(&url)
                 .set("Authorization", &self.auth_header)
                 .call()

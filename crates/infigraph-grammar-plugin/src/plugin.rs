@@ -160,7 +160,10 @@ impl GrammarPlugin {
                                 end_line: r.get("end_line")?.as_u64()? as u32,
                                 end_col: r.get("end_col")?.as_u64()? as u32,
                             }),
-                            receiver: r.get("receiver").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                            receiver: r
+                                .get("receiver")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string()),
                         })
                     })
                     .collect()

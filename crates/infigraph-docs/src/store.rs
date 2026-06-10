@@ -75,8 +75,7 @@ impl DocStore {
     }
 
     pub fn connection(&self) -> Result<Connection<'_>> {
-        Connection::new(&self.db)
-            .map_err(|e| anyhow::anyhow!("failed to create connection: {e}"))
+        Connection::new(&self.db).map_err(|e| anyhow::anyhow!("failed to create connection: {e}"))
     }
 
     pub fn get_doc_hashes(&self) -> Result<HashMap<String, String>> {
@@ -122,7 +121,10 @@ impl DocStore {
             let files: Vec<&str> = docs.iter().map(|d| d.file.as_str()).collect();
             let formats: Vec<&str> = docs.iter().map(|d| d.format.as_str()).collect();
             let hashes: Vec<&str> = docs.iter().map(|d| d.content_hash.as_str()).collect();
-            let page_counts: Vec<i64> = docs.iter().map(|d| d.page_count.unwrap_or(0) as i64).collect();
+            let page_counts: Vec<i64> = docs
+                .iter()
+                .map(|d| d.page_count.unwrap_or(0) as i64)
+                .collect();
             let chunk_counts: Vec<i64> = docs
                 .iter()
                 .map(|d| chunks.iter().filter(|c| c.doc_file == d.file).count() as i64)
@@ -158,11 +160,8 @@ impl DocStore {
             writer.write(&batch)?;
             writer.close()?;
 
-            conn.query(&format!(
-                "COPY Document FROM '{}'",
-                path.to_string_lossy()
-            ))
-            .map_err(|e| anyhow::anyhow!("COPY Document: {e}"))?;
+            conn.query(&format!("COPY Document FROM '{}'", path.to_string_lossy()))
+                .map_err(|e| anyhow::anyhow!("COPY Document: {e}"))?;
         }
 
         // Write Chunk parquet
@@ -211,11 +210,8 @@ impl DocStore {
             writer.write(&batch)?;
             writer.close()?;
 
-            conn.query(&format!(
-                "COPY Chunk FROM '{}'",
-                path.to_string_lossy()
-            ))
-            .map_err(|e| anyhow::anyhow!("COPY Chunk: {e}"))?;
+            conn.query(&format!("COPY Chunk FROM '{}'", path.to_string_lossy()))
+                .map_err(|e| anyhow::anyhow!("COPY Chunk: {e}"))?;
         }
 
         // Write HAS_CHUNK edges
@@ -243,17 +239,20 @@ impl DocStore {
             writer.write(&batch)?;
             writer.close()?;
 
-            conn.query(&format!(
-                "COPY HAS_CHUNK FROM '{}'",
-                path.to_string_lossy()
-            ))
-            .map_err(|e| anyhow::anyhow!("COPY HAS_CHUNK: {e}"))?;
+            conn.query(&format!("COPY HAS_CHUNK FROM '{}'", path.to_string_lossy()))
+                .map_err(|e| anyhow::anyhow!("COPY HAS_CHUNK: {e}"))?;
         }
 
         Ok(())
     }
 
-    pub fn upsert_source(&self, id: &str, source_type: &str, base_url: &str, space_key: &str) -> Result<()> {
+    pub fn upsert_source(
+        &self,
+        id: &str,
+        source_type: &str,
+        base_url: &str,
+        space_key: &str,
+    ) -> Result<()> {
         let conn = self.connection()?;
         let _ = conn.query(&format!(
             "MATCH (s:Source) WHERE s.id = '{}' DETACH DELETE s",
@@ -320,7 +319,13 @@ impl DocStore {
         Ok(())
     }
 
-    pub fn create_link(&self, from_doc_id: &str, to_doc_id: &str, url: &str, link_type: &str) -> Result<()> {
+    pub fn create_link(
+        &self,
+        from_doc_id: &str,
+        to_doc_id: &str,
+        url: &str,
+        link_type: &str,
+    ) -> Result<()> {
         let conn = self.connection()?;
         conn.query(&format!(
             "MATCH (a:Document), (b:Document) WHERE a.id = '{}' AND b.id = '{}' \

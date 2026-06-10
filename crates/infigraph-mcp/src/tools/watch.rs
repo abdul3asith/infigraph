@@ -17,7 +17,8 @@ pub(crate) struct WatcherEntry {
 // Global registry of active watchers
 pub(crate) static WATCHERS: Mutex<Option<HashMap<String, WatcherEntry>>> = Mutex::new(None);
 
-pub(crate) fn get_watchers() -> std::sync::MutexGuard<'static, Option<HashMap<String, WatcherEntry>>> {
+pub(crate) fn get_watchers() -> std::sync::MutexGuard<'static, Option<HashMap<String, WatcherEntry>>>
+{
     WATCHERS.lock().unwrap()
 }
 

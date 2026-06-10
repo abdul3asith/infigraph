@@ -4,8 +4,8 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::graph::{GraphQuery, SymbolDetail};
 use crate::graph::store::GraphStore;
+use crate::graph::{GraphQuery, SymbolDetail};
 
 use super::ReviewReport;
 
@@ -195,8 +195,14 @@ fn find_similar_symbols(gq: &GraphQuery, name: &str, exclude_file: &str) -> Vec<
             .filter_map(|row| {
                 let n = row.first()?.clone();
                 let f = row.get(1)?.clone();
-                if n == name { return None; }
-                Some(SimilarSymbol { name: n, file: f, score: 1.0 })
+                if n == name {
+                    return None;
+                }
+                Some(SimilarSymbol {
+                    name: n,
+                    file: f,
+                    score: 1.0,
+                })
             })
             .collect(),
         Err(_) => vec![],
@@ -261,8 +267,7 @@ impl Default for LlmConfig {
 
 impl LlmConfig {
     pub fn from_env() -> Result<Self> {
-        let api_key = std::env::var("ANTHROPIC_API_KEY")
-            .context("ANTHROPIC_API_KEY not set")?;
+        let api_key = std::env::var("ANTHROPIC_API_KEY").context("ANTHROPIC_API_KEY not set")?;
         let model = std::env::var("INFIGRAPH_LLM_MODEL")
             .unwrap_or_else(|_| "claude-sonnet-4-20250514".to_string());
         let base_url = std::env::var("INFIGRAPH_LLM_BASE_URL")
@@ -271,7 +276,12 @@ impl LlmConfig {
             .unwrap_or_else(|_| "16384".to_string())
             .parse()
             .unwrap_or(16384);
-        Ok(Self { api_key, model, max_tokens, base_url })
+        Ok(Self {
+            api_key,
+            model,
+            max_tokens,
+            base_url,
+        })
     }
 }
 
@@ -299,7 +309,9 @@ pub fn build_review_prompt(enriched: &EnrichedReport, context: Option<&str>) -> 
         prompt.push_str(&format!(
             "**User-provided context:** {}\n\
              Prioritize the user's stated intent over auto-detection. \
-             Flag anything that contradicts or undermines this goal.\n\n", ctx));
+             Flag anything that contradicts or undermines this goal.\n\n",
+            ctx
+        ));
     }
 
     // Scope-specific review instructions
@@ -309,7 +321,7 @@ pub fn build_review_prompt(enriched: &EnrichedReport, context: Option<&str>) -> 
                 "This PR spans multiple modules. Pay special attention to:\n\
                  - Cross-module API contract violations\n\
                  - Shared state mutations that affect other modules\n\
-                 - Import/dependency changes that could break build order\n\n"
+                 - Import/dependency changes that could break build order\n\n",
             );
         }
         super::PrScope::CrossRepo => {
@@ -318,7 +330,7 @@ pub fn build_review_prompt(enriched: &EnrichedReport, context: Option<&str>) -> 
                  - Interface/COM/API compatibility across repos\n\
                  - Deployment ordering constraints\n\
                  - Cross-repo blast radius\n\
-                 - Data format/schema compatibility\n\n"
+                 - Data format/schema compatibility\n\n",
             );
         }
         _ => {}
@@ -333,7 +345,7 @@ pub fn build_review_prompt(enriched: &EnrichedReport, context: Option<&str>) -> 
                  - Rollback path — can the old system resume if migration fails?\n\
                  - Schema compatibility between old and new\n\
                  - NULL/default value handling differences\n\
-                 - Performance under production data volume\n\n"
+                 - Performance under production data volume\n\n",
             );
         }
         super::PrType::BugFix => {
@@ -341,7 +353,7 @@ pub fn build_review_prompt(enriched: &EnrichedReport, context: Option<&str>) -> 
                 "This is a BUG FIX PR. Focus on:\n\
                  - Does the fix actually address the root cause?\n\
                  - Could the fix introduce regressions in callers?\n\
-                 - Is there a test that reproduces the bug?\n\n"
+                 - Is there a test that reproduces the bug?\n\n",
             );
         }
         super::PrType::Refactor => {
@@ -349,7 +361,7 @@ pub fn build_review_prompt(enriched: &EnrichedReport, context: Option<&str>) -> 
                 "This is a REFACTOR PR. Focus on:\n\
                  - Behavioral equivalence — does the refactor preserve existing behavior?\n\
                  - Are all callers updated to use the new API?\n\
-                 - Are there any callers in other repos not visible here?\n\n"
+                 - Are there any callers in other repos not visible here?\n\n",
             );
         }
         _ => {}
@@ -419,9 +431,7 @@ pub fn build_review_prompt(enriched: &EnrichedReport, context: Option<&str>) -> 
     // Partition symbols: "interesting" (have graph connections) vs "bulk" (no connections)
     let (mut interesting, bulk): (Vec<&EnrichedSymbol>, Vec<&EnrichedSymbol>) =
         enriched.enriched_symbols.iter().partition(|s| {
-            !s.callers.is_empty()
-                || !s.callees.is_empty()
-                || s.complexity.is_some_and(|c| c >= 10)
+            !s.callers.is_empty() || !s.callees.is_empty() || s.complexity.is_some_and(|c| c >= 10)
         });
     // Cap detailed symbols: prioritize by caller count + complexity
     let detail_cap = 100;
@@ -476,7 +486,11 @@ pub fn build_review_prompt(enriched: &EnrichedReport, context: Option<&str>) -> 
                 if symbols.len() <= 5 {
                     symbols.join(", ")
                 } else {
-                    format!("{}, ... and {} more", symbols[..3].join(", "), symbols.len() - 3)
+                    format!(
+                        "{}, ... and {} more",
+                        symbols[..3].join(", "),
+                        symbols.len() - 3
+                    )
                 }
             ));
         }
@@ -507,18 +521,29 @@ pub fn build_review_prompt(enriched: &EnrichedReport, context: Option<&str>) -> 
 
         if !sym.callers.is_empty() {
             let callers: Vec<&str> = sym.callers.iter().take(10).map(|s| s.as_str()).collect();
-            prompt.push_str(&format!("**Callers ({} total):** {}\n\n", sym.callers.len(), callers.join(", ")));
+            prompt.push_str(&format!(
+                "**Callers ({} total):** {}\n\n",
+                sym.callers.len(),
+                callers.join(", ")
+            ));
         }
 
         if !sym.callees.is_empty() {
             let callees: Vec<&str> = sym.callees.iter().take(10).map(|s| s.as_str()).collect();
-            prompt.push_str(&format!("**Callees ({} total):** {}\n\n", sym.callees.len(), callees.join(", ")));
+            prompt.push_str(&format!(
+                "**Callees ({} total):** {}\n\n",
+                sym.callees.len(),
+                callees.join(", ")
+            ));
         }
 
         if !sym.similar_symbols.is_empty() {
             prompt.push_str("**Similar code (may need same change):**\n");
             for s in &sym.similar_symbols {
-                prompt.push_str(&format!("  - `{}` in `{}` (similarity: {:.2})\n", s.name, s.file, s.score));
+                prompt.push_str(&format!(
+                    "  - `{}` in `{}` (similarity: {:.2})\n",
+                    s.name, s.file, s.score
+                ));
             }
             prompt.push('\n');
         }
@@ -539,7 +564,10 @@ pub fn build_review_prompt(enriched: &EnrichedReport, context: Option<&str>) -> 
             0
         }
     });
-    prompt.push_str(&format!("---\n\n### File Diffs ({} files)\n\n", sorted_diffs.len()));
+    prompt.push_str(&format!(
+        "---\n\n### File Diffs ({} files)\n\n",
+        sorted_diffs.len()
+    ));
     let mut diff_used: usize = 0;
     let mut skipped = 0usize;
     for (file, diff) in &sorted_diffs {
@@ -556,14 +584,20 @@ pub fn build_review_prompt(enriched: &EnrichedReport, context: Option<&str>) -> 
         prompt.push_str(&format!("#### `{}`\n```diff\n{}\n```\n\n", file, truncated));
     }
     if skipped > 0 {
-        prompt.push_str(&format!("_{} files omitted (diff budget exceeded)_\n\n", skipped));
+        prompt.push_str(&format!(
+            "_{} files omitted (diff budget exceeded)_\n\n",
+            skipped
+        ));
     }
 
     // Security + complexity from base report
     if !enriched.base_report.security_findings.is_empty() {
         prompt.push_str("### Existing Security Findings (from static analysis)\n");
         for f in &enriched.base_report.security_findings {
-            prompt.push_str(&format!("  - [{}] {}:{} -- {}\n", f.severity, f.file, f.line, f.message));
+            prompt.push_str(&format!(
+                "  - [{}] {}:{} -- {}\n",
+                f.severity, f.file, f.line, f.message
+            ));
         }
         prompt.push('\n');
     }
@@ -571,7 +605,10 @@ pub fn build_review_prompt(enriched: &EnrichedReport, context: Option<&str>) -> 
     if !enriched.base_report.complexity_hotspots.is_empty() {
         prompt.push_str("### Complexity Hotspots\n");
         for h in &enriched.base_report.complexity_hotspots {
-            prompt.push_str(&format!("  - `{}` in `{}` (complexity: {})\n", h.name, h.file, h.complexity));
+            prompt.push_str(&format!(
+                "  - `{}` in `{}` (complexity: {})\n",
+                h.name, h.file, h.complexity
+            ));
         }
         prompt.push('\n');
     }
@@ -579,7 +616,10 @@ pub fn build_review_prompt(enriched: &EnrichedReport, context: Option<&str>) -> 
     if !enriched.base_report.dead_code.is_empty() {
         let dead = &enriched.base_report.dead_code;
         let cap = 50;
-        prompt.push_str(&format!("### Dead Code ({} symbols with zero callers)\n", dead.len()));
+        prompt.push_str(&format!(
+            "### Dead Code ({} symbols with zero callers)\n",
+            dead.len()
+        ));
         if dead.len() > cap {
             // Group by file for large sets
             let mut by_file: HashMap<&str, Vec<&str>> = HashMap::new();
@@ -593,7 +633,11 @@ pub fn build_review_prompt(enriched: &EnrichedReport, context: Option<&str>) -> 
                 if names.len() <= 3 {
                     prompt.push_str(&format!(" -- {}\n", names.join(", ")));
                 } else {
-                    prompt.push_str(&format!(" -- {}, ... +{}\n", names[..3].join(", "), names.len() - 3));
+                    prompt.push_str(&format!(
+                        " -- {}, ... +{}\n",
+                        names[..3].join(", "),
+                        names.len() - 3
+                    ));
                 }
             }
             if sorted.len() > 20 {
@@ -615,7 +659,8 @@ pub fn build_review_prompt(enriched: &EnrichedReport, context: Option<&str>) -> 
                 c.similarity, c.symbol_a, c.file_a, c.symbol_b, c.file_b,
             ));
         }
-        prompt.push_str("\nSuggest refactoring clones into shared functions where appropriate.\n\n");
+        prompt
+            .push_str("\nSuggest refactoring clones into shared functions where appropriate.\n\n");
     }
 
     if !enriched.base_report.consistency_issues.is_empty() {
@@ -636,9 +681,8 @@ pub fn build_review_prompt(enriched: &EnrichedReport, context: Option<&str>) -> 
 }
 
 pub fn call_claude(config: &LlmConfig, prompt: &str) -> Result<LlmReviewResult> {
-    let mut messages: Vec<serde_json::Value> = vec![
-        serde_json::json!({"role": "user", "content": prompt})
-    ];
+    let mut messages: Vec<serde_json::Value> =
+        vec![serde_json::json!({"role": "user", "content": prompt})];
     let mut full_text = String::new();
     let mut total_input: u64 = 0;
     let mut total_output: u64 = 0;
@@ -687,14 +731,15 @@ pub fn call_claude(config: &LlmConfig, prompt: &str) -> Result<LlmReviewResult> 
     };
 
     let json_str = extract_json(&full_text);
-    let parsed: serde_json::Value = serde_json::from_str(json_str)
-        .unwrap_or_else(|_| serde_json::json!({
+    let parsed: serde_json::Value = serde_json::from_str(json_str).unwrap_or_else(|_| {
+        serde_json::json!({
             "summary": full_text,
             "findings": [],
             "test_plan": [],
             "risk_assessment": [],
             "deployment_notes": null
-        }));
+        })
+    });
 
     let summary = parsed["summary"].as_str().unwrap_or("").to_string();
     let findings: Vec<LlmFinding> = parse_json_array(&parsed["findings"]);
@@ -792,7 +837,10 @@ pub fn format_llm_review(result: &LlmReviewResult) -> String {
 
     // Risk Assessment
     if !result.risk_assessment.is_empty() {
-        out.push_str(&format!("### Risk Assessment ({})\n\n", result.risk_assessment.len()));
+        out.push_str(&format!(
+            "### Risk Assessment ({})\n\n",
+            result.risk_assessment.len()
+        ));
         for r in &result.risk_assessment {
             out.push_str(&format!(
                 "  [{}] **{}** -- {}\n",
@@ -812,17 +860,30 @@ pub fn format_llm_review(result: &LlmReviewResult) -> String {
 
     // Test Plan
     if !result.test_plan.is_empty() {
-        let must_pass = result.test_plan.iter().filter(|t| t.priority == "must_pass").count();
-        let should_pass = result.test_plan.iter().filter(|t| t.priority == "should_pass").count();
+        let must_pass = result
+            .test_plan
+            .iter()
+            .filter(|t| t.priority == "must_pass")
+            .count();
+        let should_pass = result
+            .test_plan
+            .iter()
+            .filter(|t| t.priority == "should_pass")
+            .count();
         let nice = result.test_plan.len() - must_pass - should_pass;
 
         out.push_str(&format!(
             "### Test Plan ({} tests: {} must-pass, {} should-pass, {} nice-to-have)\n\n",
-            result.test_plan.len(), must_pass, should_pass, nice,
+            result.test_plan.len(),
+            must_pass,
+            should_pass,
+            nice,
         ));
 
         for bucket in &["must_pass", "should_pass", "nice_to_have"] {
-            let tests: Vec<&TestCase> = result.test_plan.iter()
+            let tests: Vec<&TestCase> = result
+                .test_plan
+                .iter()
                 .filter(|t| t.priority == *bucket)
                 .collect();
             if tests.is_empty() {

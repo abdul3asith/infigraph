@@ -211,42 +211,71 @@ pub(crate) fn extra_runtime_paths() -> String {
     let mut dirs: Vec<PathBuf> = Vec::new();
 
     let node_dir = infigraph_dir().join("node");
-    let node_bin = if cfg!(windows) { node_dir.clone() } else { node_dir.join("bin") };
-    if node_bin.exists() { dirs.push(node_bin); }
+    let node_bin = if cfg!(windows) {
+        node_dir.clone()
+    } else {
+        node_dir.join("bin")
+    };
+    if node_bin.exists() {
+        dirs.push(node_bin);
+    }
 
-    let java_home_bin = infigraph_dir().join("java").join("Contents").join("Home").join("bin");
+    let java_home_bin = infigraph_dir()
+        .join("java")
+        .join("Contents")
+        .join("Home")
+        .join("bin");
     if java_home_bin.exists() {
         dirs.push(java_home_bin);
     } else {
         let java_bin_dir = infigraph_dir().join("java").join("bin");
-        if java_bin_dir.exists() { dirs.push(java_bin_dir); }
+        if java_bin_dir.exists() {
+            dirs.push(java_bin_dir);
+        }
     }
 
     let dotnet_dir = infigraph_dir().join("dotnet");
-    if dotnet_dir.exists() { dirs.push(dotnet_dir); }
+    if dotnet_dir.exists() {
+        dirs.push(dotnet_dir);
+    }
 
     let dotnet_tools = infigraph_dir().join("dotnet-tools");
-    if dotnet_tools.exists() { dirs.push(dotnet_tools); }
+    if dotnet_tools.exists() {
+        dirs.push(dotnet_tools);
+    }
 
     let dart_bin_dir = infigraph_dir().join("dart").join("bin");
-    if dart_bin_dir.exists() { dirs.push(dart_bin_dir); }
+    if dart_bin_dir.exists() {
+        dirs.push(dart_bin_dir);
+    }
 
     if let Some(home) = dirs::home_dir() {
         let pub_cache = home.join(".pub-cache").join("bin");
-        if pub_cache.exists() { dirs.push(pub_cache); }
+        if pub_cache.exists() {
+            dirs.push(pub_cache);
+        }
     }
 
     let php_dir = infigraph_dir().join("php");
-    if php_dir.exists() { dirs.push(php_dir); }
+    if php_dir.exists() {
+        dirs.push(php_dir);
+    }
 
     let composer_bin = infigraph_dir().join("composer").join("vendor").join("bin");
-    if composer_bin.exists() { dirs.push(composer_bin); }
+    if composer_bin.exists() {
+        dirs.push(composer_bin);
+    }
 
     let bin_dir = cache_dir();
-    if bin_dir.exists() { dirs.push(bin_dir); }
+    if bin_dir.exists() {
+        dirs.push(bin_dir);
+    }
 
     let sep = if cfg!(windows) { ";" } else { ":" };
-    dirs.iter().map(|d| d.to_string_lossy().to_string()).collect::<Vec<_>>().join(sep)
+    dirs.iter()
+        .map(|d| d.to_string_lossy().to_string())
+        .collect::<Vec<_>>()
+        .join(sep)
 }
 
 pub(crate) fn indexers_for_languages(detected: &HashSet<String>) -> Vec<&'static ScipIndexer> {
@@ -277,12 +306,14 @@ pub(crate) fn ensure_indexer(indexer: &ScipIndexer) -> Option<PathBuf> {
 
     let _ = std::fs::create_dir_all(&bin_dir);
     match &indexer.download {
-        DownloadStrategy::GithubRelease { owner, repo, asset_pattern } => {
+        DownloadStrategy::GithubRelease {
+            owner,
+            repo,
+            asset_pattern,
+        } => {
             download_github_release(owner, repo, asset_pattern, indexer.binary_name, &bin_dir).ok()
         }
-        DownloadStrategy::NpmInstall { package } => {
-            install_via_npm(package, indexer.binary_name)
-        }
+        DownloadStrategy::NpmInstall { package } => install_via_npm(package, indexer.binary_name),
         DownloadStrategy::DotnetTool { package } => {
             install_via_dotnet(package, indexer.binary_name)
         }
@@ -363,7 +394,12 @@ fn download_github_release(
 
     if expected_asset.ends_with(".tar.gz") {
         let status = std::process::Command::new("tar")
-            .args(["-xzf", &tmp_file.to_string_lossy(), "-C", &dest_dir.to_string_lossy()])
+            .args([
+                "-xzf",
+                &tmp_file.to_string_lossy(),
+                "-C",
+                &dest_dir.to_string_lossy(),
+            ])
             .status()
             .map_err(|e| format!("tar failed: {e}"))?;
         if !status.success() {
@@ -386,11 +422,21 @@ fn download_github_release(
     } else if expected_asset.ends_with(".zip") {
         let status = if cfg!(windows) {
             std::process::Command::new("tar")
-                .args(["-xf", &tmp_file.to_string_lossy(), "-C", &dest_dir.to_string_lossy()])
+                .args([
+                    "-xf",
+                    &tmp_file.to_string_lossy(),
+                    "-C",
+                    &dest_dir.to_string_lossy(),
+                ])
                 .status()
         } else {
             std::process::Command::new("unzip")
-                .args(["-o", &tmp_file.to_string_lossy(), "-d", &dest_dir.to_string_lossy()])
+                .args([
+                    "-o",
+                    &tmp_file.to_string_lossy(),
+                    "-d",
+                    &dest_dir.to_string_lossy(),
+                ])
                 .status()
         }
         .map_err(|e| format!("unzip failed: {e}"))?;
@@ -423,7 +469,8 @@ fn fetch_release_asset_url(api_url: &str, asset_name: &str) -> Result<String, St
         .call()
         .map_err(|e| format!("HTTP request failed: {e}"))?;
 
-    let body: serde_json::Value = resp.into_json()
+    let body: serde_json::Value = resp
+        .into_json()
         .map_err(|e| format!("JSON parse failed: {e}"))?;
 
     let assets = body["assets"]
@@ -432,7 +479,12 @@ fn fetch_release_asset_url(api_url: &str, asset_name: &str) -> Result<String, St
 
     for asset in assets {
         let name = asset["name"].as_str().unwrap_or("");
-        if name == asset_name || (asset_name == "scip-java" && name.starts_with("scip-java") && !name.ends_with(".sha256") && !name.ends_with(".bat")) {
+        if name == asset_name
+            || (asset_name == "scip-java"
+                && name.starts_with("scip-java")
+                && !name.ends_with(".sha256")
+                && !name.ends_with(".bat"))
+        {
             if let Some(url) = asset["browser_download_url"].as_str() {
                 return Ok(url.to_string());
             }
@@ -444,7 +496,12 @@ fn fetch_release_asset_url(api_url: &str, asset_name: &str) -> Result<String, St
 
 fn fetch_release_asset_url_curl(api_url: &str, asset_name: &str) -> Result<String, String> {
     let output = std::process::Command::new("curl")
-        .args(["-sSfL", "-H", "Accept: application/vnd.github.v3+json", api_url])
+        .args([
+            "-sSfL",
+            "-H",
+            "Accept: application/vnd.github.v3+json",
+            api_url,
+        ])
         .output()
         .map_err(|e| format!("curl failed: {e}"))?;
 
@@ -452,8 +509,8 @@ fn fetch_release_asset_url_curl(api_url: &str, asset_name: &str) -> Result<Strin
         return Err("curl request failed".to_string());
     }
 
-    let body: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|e| format!("JSON parse failed: {e}"))?;
+    let body: serde_json::Value =
+        serde_json::from_slice(&output.stdout).map_err(|e| format!("JSON parse failed: {e}"))?;
 
     let assets = body["assets"]
         .as_array()
@@ -461,7 +518,12 @@ fn fetch_release_asset_url_curl(api_url: &str, asset_name: &str) -> Result<Strin
 
     for asset in assets {
         let name = asset["name"].as_str().unwrap_or("");
-        if name == asset_name || (asset_name == "scip-java" && name.starts_with("scip-java") && !name.ends_with(".sha256") && !name.ends_with(".bat")) {
+        if name == asset_name
+            || (asset_name == "scip-java"
+                && name.starts_with("scip-java")
+                && !name.ends_with(".sha256")
+                && !name.ends_with(".bat"))
+        {
             if let Some(url) = asset["browser_download_url"].as_str() {
                 return Ok(url.to_string());
             }
@@ -477,11 +539,9 @@ fn download_file(url: &str, dest: &Path) -> Result<(), String> {
         .call()
         .map_err(|e| format!("download failed: {e}"))?;
 
-    let mut file = std::fs::File::create(dest)
-        .map_err(|e| format!("create file failed: {e}"))?;
+    let mut file = std::fs::File::create(dest).map_err(|e| format!("create file failed: {e}"))?;
 
-    std::io::copy(&mut resp.into_reader(), &mut file)
-        .map_err(|e| format!("write failed: {e}"))?;
+    std::io::copy(&mut resp.into_reader(), &mut file).map_err(|e| format!("write failed: {e}"))?;
 
     Ok(())
 }
@@ -515,7 +575,9 @@ fn node_download_url() -> Option<String> {
         _ => return None,
     };
     if os == "windows" {
-        Some(format!("https://nodejs.org/dist/v{NODE_VERSION}/node-v{NODE_VERSION}-{os_tag}-{arch_tag}.zip"))
+        Some(format!(
+            "https://nodejs.org/dist/v{NODE_VERSION}/node-v{NODE_VERSION}-{os_tag}-{arch_tag}.zip"
+        ))
     } else {
         Some(format!("https://nodejs.org/dist/v{NODE_VERSION}/node-v{NODE_VERSION}-{os_tag}-{arch_tag}.tar.gz"))
     }
@@ -526,7 +588,8 @@ fn ensure_node() -> Option<PathBuf> {
         return which_path("node");
     }
 
-    let node_dir = cache_dir().parent()
+    let node_dir = cache_dir()
+        .parent()
         .map(|p| p.join("node"))
         .unwrap_or_else(|| cache_dir().join("node"));
 
@@ -562,7 +625,13 @@ fn ensure_node() -> Option<PathBuf> {
 
     if archive_name.ends_with(".tar.gz") {
         let ok = std::process::Command::new("tar")
-            .args(["--strip-components=1", "-xzf", &tmp_file.to_string_lossy(), "-C", &node_dir.to_string_lossy()])
+            .args([
+                "--strip-components=1",
+                "-xzf",
+                &tmp_file.to_string_lossy(),
+                "-C",
+                &node_dir.to_string_lossy(),
+            ])
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
@@ -575,7 +644,12 @@ fn ensure_node() -> Option<PathBuf> {
         let extract_dir = tmp.join("node_extract");
         let _ = std::fs::create_dir_all(&extract_dir);
         let ok = std::process::Command::new("tar")
-            .args(["-xf", &tmp_file.to_string_lossy(), "-C", &extract_dir.to_string_lossy()])
+            .args([
+                "-xf",
+                &tmp_file.to_string_lossy(),
+                "-C",
+                &extract_dir.to_string_lossy(),
+            ])
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
@@ -598,7 +672,10 @@ fn ensure_node() -> Option<PathBuf> {
 
     if node_bin.exists() {
         write_runtime_version("node", NODE_VERSION);
-        println!("Auto-SCIP: portable Node.js v{NODE_VERSION} installed to {}", node_dir.display());
+        println!(
+            "Auto-SCIP: portable Node.js v{NODE_VERSION} installed to {}",
+            node_dir.display()
+        );
         Some(node_bin)
     } else {
         eprintln!("Auto-SCIP: Node.js binary not found after extraction");
@@ -624,7 +701,10 @@ fn install_via_npm(package: &str, binary_name: &str) -> Option<PathBuf> {
             eprintln!("Auto-SCIP: skipping {binary_name} — npm not found");
             return None;
         }
-        let prefix = node_bin.parent().and_then(|p| p.parent()).map(|p| p.to_path_buf());
+        let prefix = node_bin
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf());
         (npm.to_string_lossy().to_string(), prefix)
     };
 
@@ -648,7 +728,11 @@ fn install_via_npm(package: &str, binary_name: &str) -> Option<PathBuf> {
             } else {
                 prefix.join("bin").join(binary_name)
             };
-            if p.exists() { Some(p) } else { which_path(binary_name) }
+            if p.exists() {
+                Some(p)
+            } else {
+                which_path(binary_name)
+            }
         } else {
             which_path(binary_name)
         };
@@ -679,7 +763,15 @@ fn write_runtime_version(name: &str, version: &str) {
 
 pub(crate) fn clean_runtimes() {
     let ig = infigraph_dir();
-    for name in &["node", "java", "dotnet", "dart", "php", "composer", "dotnet-tools"] {
+    for name in &[
+        "node",
+        "java",
+        "dotnet",
+        "dart",
+        "php",
+        "composer",
+        "dotnet-tools",
+    ] {
         let dir = ig.join(name);
         if dir.exists() {
             let _ = std::fs::remove_dir_all(&dir);
@@ -704,11 +796,17 @@ fn java_works() -> bool {
 }
 
 fn ensure_java() -> Option<PathBuf> {
-    if java_works() { return which_path("java"); }
+    if java_works() {
+        return which_path("java");
+    }
 
     let java_dir = infigraph_dir().join("java");
     let java_bin = if cfg!(target_os = "macos") {
-        java_dir.join("Contents").join("Home").join("bin").join("java")
+        java_dir
+            .join("Contents")
+            .join("Home")
+            .join("bin")
+            .join("java")
     } else if cfg!(windows) {
         java_dir.join("bin").join("java.exe")
     } else {
@@ -723,8 +821,17 @@ fn ensure_java() -> Option<PathBuf> {
 
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
-    let os_tag = match os { "macos" => "mac", "linux" => "linux", "windows" => "windows", _ => return None };
-    let arch_tag = match arch { "aarch64" => "aarch64", "x86_64" => "x64", _ => return None };
+    let os_tag = match os {
+        "macos" => "mac",
+        "linux" => "linux",
+        "windows" => "windows",
+        _ => return None,
+    };
+    let arch_tag = match arch {
+        "aarch64" => "aarch64",
+        "x86_64" => "x64",
+        _ => return None,
+    };
 
     let url = format!(
         "https://api.adoptium.net/v3/binary/latest/{JRE_VERSION}/ga/{os_tag}/{arch_tag}/jre/hotspot/normal/eclipse"
@@ -746,13 +853,24 @@ fn ensure_java() -> Option<PathBuf> {
     let _ = std::fs::create_dir_all(&java_dir);
     let ok = if ext == "zip" {
         std::process::Command::new("tar")
-            .args(["-xf", &tmp_file.to_string_lossy(), "-C", &java_dir.to_string_lossy()])
+            .args([
+                "-xf",
+                &tmp_file.to_string_lossy(),
+                "-C",
+                &java_dir.to_string_lossy(),
+            ])
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
     } else {
         std::process::Command::new("tar")
-            .args(["--strip-components=1", "-xzf", &tmp_file.to_string_lossy(), "-C", &java_dir.to_string_lossy()])
+            .args([
+                "--strip-components=1",
+                "-xzf",
+                &tmp_file.to_string_lossy(),
+                "-C",
+                &java_dir.to_string_lossy(),
+            ])
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
@@ -761,7 +879,10 @@ fn ensure_java() -> Option<PathBuf> {
 
     if ok && java_bin.exists() {
         write_runtime_version("java", JRE_VERSION);
-        println!("Auto-SCIP: portable JRE {JRE_VERSION} installed to {}", java_dir.display());
+        println!(
+            "Auto-SCIP: portable JRE {JRE_VERSION} installed to {}",
+            java_dir.display()
+        );
         Some(java_bin)
     } else {
         eprintln!("Auto-SCIP: JRE extraction failed");
@@ -772,7 +893,9 @@ fn ensure_java() -> Option<PathBuf> {
 const DOTNET_VERSION: &str = "8.0.412";
 
 fn ensure_dotnet() -> Option<PathBuf> {
-    if on_path("dotnet") { return which_path("dotnet"); }
+    if on_path("dotnet") {
+        return which_path("dotnet");
+    }
 
     let dotnet_dir = infigraph_dir().join("dotnet");
     let dotnet_bin = if cfg!(windows) {
@@ -789,8 +912,17 @@ fn ensure_dotnet() -> Option<PathBuf> {
 
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
-    let os_tag = match os { "macos" => "osx", "linux" => "linux", "windows" => "win", _ => return None };
-    let arch_tag = match arch { "aarch64" => "arm64", "x86_64" => "x64", _ => return None };
+    let os_tag = match os {
+        "macos" => "osx",
+        "linux" => "linux",
+        "windows" => "win",
+        _ => return None,
+    };
+    let arch_tag = match arch {
+        "aarch64" => "arm64",
+        "x86_64" => "x64",
+        _ => return None,
+    };
     let ext = if os == "windows" { "zip" } else { "tar.gz" };
 
     let url = format!(
@@ -810,7 +942,12 @@ fn ensure_dotnet() -> Option<PathBuf> {
 
     let _ = std::fs::create_dir_all(&dotnet_dir);
     let ok = std::process::Command::new("tar")
-        .args(["-xzf", &tmp_file.to_string_lossy(), "-C", &dotnet_dir.to_string_lossy()])
+        .args([
+            "-xzf",
+            &tmp_file.to_string_lossy(),
+            "-C",
+            &dotnet_dir.to_string_lossy(),
+        ])
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
@@ -818,7 +955,10 @@ fn ensure_dotnet() -> Option<PathBuf> {
 
     if ok && dotnet_bin.exists() {
         write_runtime_version("dotnet", DOTNET_VERSION);
-        println!("Auto-SCIP: portable .NET SDK {DOTNET_VERSION} installed to {}", dotnet_dir.display());
+        println!(
+            "Auto-SCIP: portable .NET SDK {DOTNET_VERSION} installed to {}",
+            dotnet_dir.display()
+        );
         Some(dotnet_bin)
     } else {
         eprintln!("Auto-SCIP: .NET SDK extraction failed");
@@ -829,7 +969,9 @@ fn ensure_dotnet() -> Option<PathBuf> {
 const DART_VERSION: &str = "3.12.1";
 
 fn ensure_dart() -> Option<PathBuf> {
-    if on_path("dart") { return which_path("dart"); }
+    if on_path("dart") {
+        return which_path("dart");
+    }
 
     let dart_dir = infigraph_dir().join("dart");
     let dart_bin = if cfg!(windows) {
@@ -846,8 +988,17 @@ fn ensure_dart() -> Option<PathBuf> {
 
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
-    let os_tag = match os { "macos" => "macos", "linux" => "linux", "windows" => "windows", _ => return None };
-    let arch_tag = match arch { "aarch64" => "arm64", "x86_64" => "x64", _ => return None };
+    let os_tag = match os {
+        "macos" => "macos",
+        "linux" => "linux",
+        "windows" => "windows",
+        _ => return None,
+    };
+    let arch_tag = match arch {
+        "aarch64" => "arm64",
+        "x86_64" => "x64",
+        _ => return None,
+    };
 
     let url = format!(
         "https://storage.googleapis.com/dart-archive/channels/stable/release/{DART_VERSION}/sdk/dartsdk-{os_tag}-{arch_tag}-release.zip"
@@ -867,7 +1018,12 @@ fn ensure_dart() -> Option<PathBuf> {
     let extract_dir = std::env::temp_dir().join("dart_extract");
     let _ = std::fs::create_dir_all(&extract_dir);
     let ok = std::process::Command::new("unzip")
-        .args(["-qo", &tmp_file.to_string_lossy(), "-d", &extract_dir.to_string_lossy()])
+        .args([
+            "-qo",
+            &tmp_file.to_string_lossy(),
+            "-d",
+            &extract_dir.to_string_lossy(),
+        ])
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
@@ -883,7 +1039,10 @@ fn ensure_dart() -> Option<PathBuf> {
 
     if dart_bin.exists() {
         write_runtime_version("dart", DART_VERSION);
-        println!("Auto-SCIP: portable Dart SDK {DART_VERSION} installed to {}", dart_dir.display());
+        println!(
+            "Auto-SCIP: portable Dart SDK {DART_VERSION} installed to {}",
+            dart_dir.display()
+        );
         Some(dart_bin)
     } else {
         eprintln!("Auto-SCIP: Dart SDK extraction failed");
@@ -894,7 +1053,9 @@ fn ensure_dart() -> Option<PathBuf> {
 const PHP_VERSION: &str = "8.4.21";
 
 fn ensure_php() -> Option<PathBuf> {
-    if on_path("php") { return which_path("php"); }
+    if on_path("php") {
+        return which_path("php");
+    }
 
     let php_dir = infigraph_dir().join("php");
     let php_bin = if cfg!(windows) {
@@ -911,8 +1072,16 @@ fn ensure_php() -> Option<PathBuf> {
 
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
-    let os_tag = match os { "macos" => "macos", "linux" => "linux", _ => return None };
-    let arch_tag = match arch { "aarch64" => "aarch64", "x86_64" => "x86_64", _ => return None };
+    let os_tag = match os {
+        "macos" => "macos",
+        "linux" => "linux",
+        _ => return None,
+    };
+    let arch_tag = match arch {
+        "aarch64" => "aarch64",
+        "x86_64" => "x86_64",
+        _ => return None,
+    };
 
     let url = format!(
         "https://dl.static-php.dev/static-php-cli/common/php-{PHP_VERSION}-cli-{os_tag}-{arch_tag}.tar.gz"
@@ -931,7 +1100,12 @@ fn ensure_php() -> Option<PathBuf> {
 
     let _ = std::fs::create_dir_all(&php_dir);
     let ok = std::process::Command::new("tar")
-        .args(["-xzf", &tmp_file.to_string_lossy(), "-C", &php_dir.to_string_lossy()])
+        .args([
+            "-xzf",
+            &tmp_file.to_string_lossy(),
+            "-C",
+            &php_dir.to_string_lossy(),
+        ])
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
@@ -952,7 +1126,10 @@ fn ensure_php() -> Option<PathBuf> {
     }
 
     write_runtime_version("php", PHP_VERSION);
-    println!("Auto-SCIP: portable PHP {PHP_VERSION} installed to {}", php_dir.display());
+    println!(
+        "Auto-SCIP: portable PHP {PHP_VERSION} installed to {}",
+        php_dir.display()
+    );
     Some(php_bin)
 }
 
@@ -982,7 +1159,13 @@ fn install_via_dotnet(package: &str, binary_name: &str) -> Option<PathBuf> {
 
     println!("Auto-SCIP: installing {binary_name} via dotnet tool...");
     let mut cmd = std::process::Command::new(&dotnet_cmd);
-    cmd.args(["tool", "install", "--tool-path", &tool_dir.to_string_lossy(), package]);
+    cmd.args([
+        "tool",
+        "install",
+        "--tool-path",
+        &tool_dir.to_string_lossy(),
+        package,
+    ]);
     if dotnet_dir.exists() {
         let path = std::env::var("PATH").unwrap_or_default();
         cmd.env("PATH", format!("{}:{path}", dotnet_dir.display()));
@@ -1005,7 +1188,9 @@ fn install_via_dotnet(package: &str, binary_name: &str) -> Option<PathBuf> {
 
 fn find_ca_bundle() -> Result<String, ()> {
     if let Ok(v) = std::env::var("SSL_CERT_FILE") {
-        if std::path::Path::new(&v).exists() { return Ok(v); }
+        if std::path::Path::new(&v).exists() {
+            return Ok(v);
+        }
     }
     for path in &[
         "/etc/ssl/cert.pem",
@@ -1013,7 +1198,9 @@ fn find_ca_bundle() -> Result<String, ()> {
         "/etc/pki/tls/certs/ca-bundle.crt",
         "/etc/ssl/ca-bundle.pem",
     ] {
-        if std::path::Path::new(path).exists() { return Ok(path.to_string()); }
+        if std::path::Path::new(path).exists() {
+            return Ok(path.to_string());
+        }
     }
     Err(())
 }
@@ -1045,14 +1232,23 @@ fn install_via_composer(package: &str, binary_name: &str) -> Option<PathBuf> {
 
     let vdir = vendor_dir.to_string_lossy().to_string();
     let composer_json = vendor_dir.join("composer.json");
-    let _ = std::fs::write(&composer_json, r#"{"config":{"policy":{"advisories":{"block":false}}}}"#);
+    let _ = std::fs::write(
+        &composer_json,
+        r#"{"config":{"policy":{"advisories":{"block":false}}}}"#,
+    );
 
     let ok = if composer_cmd.ends_with(".phar") {
         let ca = find_ca_bundle().unwrap_or_default();
         let mut cmd = std::process::Command::new(&php_bin);
         cmd.args([
-            "-d", &format!("openssl.cafile={ca}"),
-            &composer_cmd, "require", "--no-audit", "--working-dir", &vdir, package,
+            "-d",
+            &format!("openssl.cafile={ca}"),
+            &composer_cmd,
+            "require",
+            "--no-audit",
+            "--working-dir",
+            &vdir,
+            package,
         ]);
         cmd.env("SSL_CERT_FILE", &ca);
         cmd.status().map(|s| s.success()).unwrap_or(false)
@@ -1095,8 +1291,8 @@ fn install_via_dart_pub(package: &str, binary_name: &str) -> Option<PathBuf> {
     let ok = cmd.status().map(|s| s.success()).unwrap_or(false);
 
     if ok {
-        let pub_cache_bin = dirs::home_dir()
-            .map(|h| h.join(".pub-cache").join("bin").join(binary_name));
+        let pub_cache_bin =
+            dirs::home_dir().map(|h| h.join(".pub-cache").join("bin").join(binary_name));
         if let Some(ref p) = pub_cache_bin {
             if p.exists() {
                 println!("Auto-SCIP: {binary_name} installed via dart pub");
@@ -1120,10 +1316,18 @@ mod tests {
     #[test]
     fn test_catalog_coverage() {
         for indexer in CATALOG {
-            assert!(!indexer.lang_tags.is_empty(), "{} has no lang_tags", indexer.binary_name);
+            assert!(
+                !indexer.lang_tags.is_empty(),
+                "{} has no lang_tags",
+                indexer.binary_name
+            );
             assert!(!indexer.binary_name.is_empty());
             if indexer.binary_name != "scip-clang" {
-                assert!(!indexer.scip_args.is_empty(), "{} has no scip_args", indexer.binary_name);
+                assert!(
+                    !indexer.scip_args.is_empty(),
+                    "{} has no scip_args",
+                    indexer.binary_name
+                );
             }
         }
     }
@@ -1131,7 +1335,9 @@ mod tests {
     #[test]
     fn test_indexers_for_languages() {
         let detected: HashSet<String> = ["typescript", "python", "rust"]
-            .iter().map(|s| s.to_string()).collect();
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let result = indexers_for_languages(&detected);
         assert_eq!(result.len(), 3);
         let names: Vec<&str> = result.iter().map(|i| i.binary_name).collect();
@@ -1142,8 +1348,7 @@ mod tests {
 
     #[test]
     fn test_indexers_dedup() {
-        let detected: HashSet<String> = ["java", "kotlin"]
-            .iter().map(|s| s.to_string()).collect();
+        let detected: HashSet<String> = ["java", "kotlin"].iter().map(|s| s.to_string()).collect();
         let result = indexers_for_languages(&detected);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].binary_name, "scip-java");
@@ -1151,20 +1356,47 @@ mod tests {
 
     #[test]
     fn test_asset_pattern_platforms() {
-        assert_eq!(scip_go_asset("macos", "aarch64"), Some("scip-go-darwin-arm64.tar.gz".to_string()));
-        assert_eq!(scip_go_asset("linux", "x86_64"), Some("scip-go-linux-amd64.tar.gz".to_string()));
+        assert_eq!(
+            scip_go_asset("macos", "aarch64"),
+            Some("scip-go-darwin-arm64.tar.gz".to_string())
+        );
+        assert_eq!(
+            scip_go_asset("linux", "x86_64"),
+            Some("scip-go-linux-amd64.tar.gz".to_string())
+        );
         assert_eq!(scip_go_asset("windows", "x86_64"), None);
 
-        assert_eq!(rust_analyzer_asset("macos", "aarch64"), Some("rust-analyzer-aarch64-apple-darwin.gz".to_string()));
-        assert_eq!(rust_analyzer_asset("linux", "x86_64"), Some("rust-analyzer-x86_64-unknown-linux-gnu.gz".to_string()));
-        assert_eq!(rust_analyzer_asset("windows", "x86_64"), Some("rust-analyzer-x86_64-pc-windows-msvc.zip".to_string()));
+        assert_eq!(
+            rust_analyzer_asset("macos", "aarch64"),
+            Some("rust-analyzer-aarch64-apple-darwin.gz".to_string())
+        );
+        assert_eq!(
+            rust_analyzer_asset("linux", "x86_64"),
+            Some("rust-analyzer-x86_64-unknown-linux-gnu.gz".to_string())
+        );
+        assert_eq!(
+            rust_analyzer_asset("windows", "x86_64"),
+            Some("rust-analyzer-x86_64-pc-windows-msvc.zip".to_string())
+        );
 
-        assert_eq!(scip_ruby_asset("macos", "aarch64"), Some("scip-ruby-arm64-darwin".to_string()));
-        assert_eq!(scip_ruby_asset("linux", "x86_64"), Some("scip-ruby-x86_64-linux".to_string()));
+        assert_eq!(
+            scip_ruby_asset("macos", "aarch64"),
+            Some("scip-ruby-arm64-darwin".to_string())
+        );
+        assert_eq!(
+            scip_ruby_asset("linux", "x86_64"),
+            Some("scip-ruby-x86_64-linux".to_string())
+        );
         assert_eq!(scip_ruby_asset("windows", "x86_64"), None);
 
-        assert_eq!(scip_clang_asset("macos", "aarch64"), Some("scip-clang-arm64-darwin".to_string()));
-        assert_eq!(scip_clang_asset("linux", "x86_64"), Some("scip-clang-x86_64-linux".to_string()));
+        assert_eq!(
+            scip_clang_asset("macos", "aarch64"),
+            Some("scip-clang-arm64-darwin".to_string())
+        );
+        assert_eq!(
+            scip_clang_asset("linux", "x86_64"),
+            Some("scip-clang-x86_64-linux".to_string())
+        );
         assert_eq!(scip_clang_asset("windows", "x86_64"), None);
     }
 
@@ -1172,8 +1404,14 @@ mod tests {
     fn test_cache_dir() {
         let dir = cache_dir();
         let path_str = dir.to_string_lossy();
-        assert!(path_str.contains("infigraph"), "cache dir should contain 'infigraph': {path_str}");
-        assert!(path_str.ends_with("bin"), "cache dir should end with 'bin': {path_str}");
+        assert!(
+            path_str.contains("infigraph"),
+            "cache dir should contain 'infigraph': {path_str}"
+        );
+        assert!(
+            path_str.ends_with("bin"),
+            "cache dir should end with 'bin': {path_str}"
+        );
     }
 
     #[test]
@@ -1184,7 +1422,8 @@ mod tests {
                 assert!(
                     !all_tags.contains(tag),
                     "duplicate lang_tag '{}' in {} (already in another indexer)",
-                    tag, indexer.binary_name
+                    tag,
+                    indexer.binary_name
                 );
                 all_tags.push(tag);
             }

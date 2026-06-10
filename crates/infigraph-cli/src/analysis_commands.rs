@@ -48,9 +48,8 @@ fn build_architecture_report(gq: &infigraph_core::graph::GraphQuery) -> Result<S
 
     // 3. Hotspots: files with most symbols
     out.push_str("\n=== Hotspot Files (most symbols) ===\n");
-    let hotspot_rows = gq.raw_query(
-        "MATCH (s:Symbol) RETURN s.file, count(s) AS cnt ORDER BY cnt DESC LIMIT 10",
-    )?;
+    let hotspot_rows =
+        gq.raw_query("MATCH (s:Symbol) RETURN s.file, count(s) AS cnt ORDER BY cnt DESC LIMIT 10")?;
     if hotspot_rows.is_empty() {
         out.push_str("  (no symbols indexed)\n");
     } else {
@@ -263,7 +262,11 @@ fn parse_diff_hunks(diff: &str) -> Vec<(String, u32, u32)> {
     hunks
 }
 
-pub(crate) fn cmd_security(root: &Path, severity: Option<&str>, category: Option<&str>) -> Result<()> {
+pub(crate) fn cmd_security(
+    root: &Path,
+    severity: Option<&str>,
+    category: Option<&str>,
+) -> Result<()> {
     let canonical = root.canonicalize().context("invalid project root")?;
     let mut scan = infigraph_core::security::scan_project(&canonical)?;
 
@@ -339,7 +342,12 @@ pub(crate) fn cmd_complexity(root: &Path, threshold: u32, file: Option<&str>) ->
     Ok(())
 }
 
-pub(crate) fn cmd_refactor(root: &Path, target: Option<&str>, focus: &str, limit: usize) -> Result<()> {
+pub(crate) fn cmd_refactor(
+    root: &Path,
+    target: Option<&str>,
+    focus: &str,
+    limit: usize,
+) -> Result<()> {
     let registry = bundled_registry()?;
     let mut prism = Infigraph::open(root, registry)?;
     prism.init()?;
@@ -425,8 +433,7 @@ pub(crate) fn cmd_review(
 
     if llm || dry_run {
         use infigraph_core::review::llm;
-        let (prompt, result) =
-            llm::review_with_llm(root, &report, store, dry_run, context)?;
+        let (prompt, result) = llm::review_with_llm(root, &report, store, dry_run, context)?;
 
         if dry_run {
             println!("{}", prompt);
@@ -520,11 +527,7 @@ pub(crate) fn cmd_vulns(
     Ok(())
 }
 
-pub(crate) fn cmd_detect_patterns(
-    root: &Path,
-    pattern: Option<&str>,
-    json: bool,
-) -> Result<()> {
+pub(crate) fn cmd_detect_patterns(root: &Path, pattern: Option<&str>, json: bool) -> Result<()> {
     let registry = bundled_registry()?;
     let mut prism = Infigraph::open(root, registry)?;
     prism.init()?;
@@ -564,9 +567,8 @@ pub(crate) fn cmd_bridges_promote(root: &Path) -> Result<()> {
     let gq = infigraph_core::graph::GraphQuery::new(&conn);
 
     // Find BRIDGE_TO edges where both endpoints are resolved symbols, promote to CALLS
-    let bridge_rows = gq.raw_query(
-        "MATCH (a:Symbol)-[r:BRIDGE_TO]->(b:Symbol) RETURN a.id, b.id",
-    )?;
+    let bridge_rows =
+        gq.raw_query("MATCH (a:Symbol)-[r:BRIDGE_TO]->(b:Symbol) RETURN a.id, b.id")?;
 
     if bridge_rows.is_empty() {
         println!("No BRIDGE_TO edges found to promote.");

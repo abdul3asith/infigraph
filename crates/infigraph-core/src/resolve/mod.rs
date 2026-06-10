@@ -15,7 +15,13 @@ pub fn resolve_calls_incremental(
     learned_store: Option<&LearnedStore>,
 ) -> Result<ResolveStats> {
     if extractions.is_empty() {
-        return Ok(ResolveStats { total_calls: 0, resolved: 0, unresolved: 0, learned_resolved: 0, inherits_resolved: 0 });
+        return Ok(ResolveStats {
+            total_calls: 0,
+            resolved: 0,
+            unresolved: 0,
+            learned_resolved: 0,
+            inherits_resolved: 0,
+        });
     }
 
     let conn = store.connection()?;
@@ -52,10 +58,11 @@ pub fn resolve_calls(
     let mut symbol_map: HashMap<String, Vec<(String, String, String)>> = HashMap::new();
     for ext in extractions {
         for sym in &ext.symbols {
-            symbol_map
-                .entry(sym.name.clone())
-                .or_default()
-                .push((sym.id.clone(), ext.file.clone(), sym.kind.as_str().to_string()));
+            symbol_map.entry(sym.name.clone()).or_default().push((
+                sym.id.clone(),
+                ext.file.clone(),
+                sym.kind.as_str().to_string(),
+            ));
         }
     }
 
@@ -86,7 +93,10 @@ fn resolve_with_map(
                     let method = parts[0];
                     let class = parts[1];
                     let key = format!("{}::{}", class, method);
-                    class_method_map.entry(key).or_default().push((id.clone(), _file.clone()));
+                    class_method_map
+                        .entry(key)
+                        .or_default()
+                        .push((id.clone(), _file.clone()));
                 }
             }
         }
@@ -99,10 +109,13 @@ fn resolve_with_map(
             .map(|s| (s.name.as_str(), s.id.as_str()))
             .collect();
 
-        let imported_stems: std::collections::HashSet<String> = ext.relations.iter()
+        let imported_stems: std::collections::HashSet<String> = ext
+            .relations
+            .iter()
             .filter(|r| r.kind == RelationKind::Imports)
             .map(|r| {
-                let raw = r.target_id
+                let raw = r
+                    .target_id
                     .rsplit(['/', '\\', '.'])
                     .next()
                     .unwrap_or(&r.target_id);
@@ -117,11 +130,7 @@ fn resolve_with_map(
                 continue;
             }
 
-            let target_name = rel
-                .target_id
-                .rsplit("::")
-                .next()
-                .unwrap_or(&rel.target_id);
+            let target_name = rel.target_id.rsplit("::").next().unwrap_or(&rel.target_id);
 
             if local_symbols.contains_key(target_name) {
                 continue;
@@ -133,10 +142,13 @@ fn resolve_with_map(
             if let Some(ls) = learned_store {
                 if let Some(pattern) = ls.lookup(&ext.file, target_name) {
                     let target_exists = symbol_map.values().any(|candidates| {
-                        candidates.iter().any(|(id, _, _)| *id == pattern.resolved_to_symbol)
+                        candidates
+                            .iter()
+                            .any(|(id, _, _)| *id == pattern.resolved_to_symbol)
                     });
                     if target_exists {
-                        resolved_pairs.push((rel.source_id.clone(), pattern.resolved_to_symbol.clone()));
+                        resolved_pairs
+                            .push((rel.source_id.clone(), pattern.resolved_to_symbol.clone()));
                         resolved += 1;
                         learned_resolved += 1;
                         continue;
@@ -151,7 +163,8 @@ fn resolve_with_map(
                     let best = if matches.len() == 1 {
                         Some(matches[0].0.clone())
                     } else {
-                        matches.iter()
+                        matches
+                            .iter()
                             .find(|(_, f)| {
                                 let stem = std::path::Path::new(f)
                                     .file_stem()
@@ -172,10 +185,7 @@ fn resolve_with_map(
             }
 
             // Strategy 2: Enclosing-class preference.
-            let caller_class = rel.source_id
-                .rsplit("::")
-                .nth(1)
-                .map(|s| s.to_string());
+            let caller_class = rel.source_id.rsplit("::").nth(1).map(|s| s.to_string());
 
             if let Some(candidates) = symbol_map.get(target_name) {
                 let cross_file: Vec<_> = candidates
@@ -195,17 +205,17 @@ fn resolve_with_map(
                     Some(cross_file[0].0.clone())
                 } else if cross_file.len() > 1 {
                     let by_receiver: Option<String> = rel.receiver.as_ref().and_then(|recv| {
-                        cross_file.iter()
-                            .find(|(id, _, _)| {
-                                id.contains(&format!("::{}::{}", recv, target_name))
-                            })
+                        cross_file
+                            .iter()
+                            .find(|(id, _, _)| id.contains(&format!("::{}::{}", recv, target_name)))
                             .map(|(id, _, _)| id.clone())
                     });
 
                     if by_receiver.is_some() {
                         by_receiver
                     } else if let Some(ref cls) = caller_class {
-                        let same_class = cross_file.iter()
+                        let same_class = cross_file
+                            .iter()
                             .find(|(id, _, _)| id.contains(&format!("::{cls}::")))
                             .map(|(id, _, _)| id.clone());
                         if same_class.is_some() {
@@ -234,7 +244,6 @@ fn resolve_with_map(
 
     // Batch insert resolved CALLS edges via COPY FROM parquet
     if !resolved_pairs.is_empty() {
-
         let mut known_ids: std::collections::HashSet<&str> = symbol_map
             .values()
             .flat_map(|v| v.iter().map(|(id, _, _)| id.as_str()))
@@ -247,15 +256,19 @@ fn resolve_with_map(
         let mut file_name_to_ids: HashMap<(String, String), Vec<String>> = HashMap::new();
         for ext in extractions {
             for sym in &ext.symbols {
-                file_name_to_ids.entry((ext.file.clone(), sym.name.clone()))
-                    .or_default().push(sym.id.clone());
+                file_name_to_ids
+                    .entry((ext.file.clone(), sym.name.clone()))
+                    .or_default()
+                    .push(sym.id.clone());
             }
         }
         for candidates in symbol_map.values() {
             for (id, file, _kind) in candidates {
                 let name = id.rsplit("::").next().unwrap_or(id);
-                file_name_to_ids.entry((file.clone(), name.to_string()))
-                    .or_default().push(id.clone());
+                file_name_to_ids
+                    .entry((file.clone(), name.to_string()))
+                    .or_default()
+                    .push(id.clone());
             }
         }
 
@@ -267,7 +280,9 @@ fn resolve_with_map(
                 } else if let Some(sep) = src.rfind("::") {
                     let file_part = &src[..sep];
                     let name_part = &src[sep + 2..];
-                    if let Some(ids) = file_name_to_ids.get(&(file_part.to_string(), name_part.to_string())) {
+                    if let Some(ids) =
+                        file_name_to_ids.get(&(file_part.to_string(), name_part.to_string()))
+                    {
                         ids.iter()
                             .filter(|id| known_ids.contains(id.as_str()))
                             .map(|id| (id.clone(), tgt.clone()))
@@ -283,10 +298,15 @@ fn resolve_with_map(
 
         let valid_pairs: Vec<&(String, String)> = fixed_pairs
             .iter()
-            .filter(|(src, tgt)| known_ids.contains(src.as_str()) && known_ids.contains(tgt.as_str()))
+            .filter(|(src, tgt)| {
+                known_ids.contains(src.as_str()) && known_ids.contains(tgt.as_str())
+            })
             .collect();
 
-        let refs: Vec<(&str, &str)> = valid_pairs.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        let refs: Vec<(&str, &str)> = valid_pairs
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
         let pq_path = std::env::temp_dir().join("infigraph_resolve_calls.parquet");
         crate::graph::parquet_loader::write_edge_parquet(&pq_path, &refs)?;
         let copy_result = conn.query(&format!(
@@ -297,9 +317,10 @@ fn resolve_with_map(
             eprintln!("[resolve] COPY FROM parquet failed ({e}), falling back to UNWIND");
             const CHUNK_SIZE: usize = 500;
             for chunk in refs.chunks(CHUNK_SIZE) {
-                let pair_list: Vec<String> = chunk.iter().map(|(a, b)| {
-                    format!("{{a: '{}', b: '{}'}}", escape(a), escape(b))
-                }).collect();
+                let pair_list: Vec<String> = chunk
+                    .iter()
+                    .map(|(a, b)| format!("{{a: '{}', b: '{}'}}", escape(a), escape(b)))
+                    .collect();
                 let _ = conn.query(&format!(
                     "UNWIND [{}] AS p MATCH (a:Symbol), (b:Symbol) WHERE a.id = p.a AND b.id = p.b CREATE (a)-[:CALLS]->(b)",
                     pair_list.join(", ")
@@ -326,7 +347,13 @@ pub fn re_resolve_for_files(
     learned_store: Option<&LearnedStore>,
 ) -> Result<ResolveStats> {
     if files.is_empty() || extractions.is_empty() {
-        return Ok(ResolveStats { total_calls: 0, resolved: 0, unresolved: 0, learned_resolved: 0, inherits_resolved: 0 });
+        return Ok(ResolveStats {
+            total_calls: 0,
+            resolved: 0,
+            unresolved: 0,
+            learned_resolved: 0,
+            inherits_resolved: 0,
+        });
     }
 
     let conn = store.connection()?;
@@ -349,7 +376,8 @@ pub fn re_resolve_for_files(
     }
 
     let target_files: std::collections::HashSet<&str> = files.iter().map(|f| f.as_str()).collect();
-    let filtered: Vec<&FileExtraction> = extractions.iter()
+    let filtered: Vec<&FileExtraction> = extractions
+        .iter()
         .filter(|e| target_files.contains(e.file.as_str()))
         .collect();
 
@@ -400,16 +428,16 @@ fn resolve_inherits(
     let mut resolved_pairs: Vec<(String, String)> = Vec::new();
 
     for ext in extractions {
-        let local_symbols: std::collections::HashSet<&str> = ext
-            .symbols
-            .iter()
-            .map(|s| s.name.as_str())
-            .collect();
+        let local_symbols: std::collections::HashSet<&str> =
+            ext.symbols.iter().map(|s| s.name.as_str()).collect();
 
-        let imported_stems: std::collections::HashSet<String> = ext.relations.iter()
+        let imported_stems: std::collections::HashSet<String> = ext
+            .relations
+            .iter()
             .filter(|r| r.kind == RelationKind::Imports)
             .map(|r| {
-                let raw = r.target_id
+                let raw = r
+                    .target_id
                     .rsplit(['/', '\\', '.'])
                     .next()
                     .unwrap_or(&r.target_id);
@@ -422,11 +450,7 @@ fn resolve_inherits(
                 continue;
             }
 
-            let target_name = rel
-                .target_id
-                .rsplit("::")
-                .next()
-                .unwrap_or(&rel.target_id);
+            let target_name = rel.target_id.rsplit("::").next().unwrap_or(&rel.target_id);
 
             if local_symbols.contains(target_name) {
                 continue;
@@ -435,9 +459,7 @@ fn resolve_inherits(
             if let Some(candidates) = symbol_map.get(target_name) {
                 let cross_file: Vec<_> = candidates
                     .iter()
-                    .filter(|(_, f, kind)| {
-                        *f != ext.file && TYPE_KINDS.contains(&kind.as_str())
-                    })
+                    .filter(|(_, f, kind)| *f != ext.file && TYPE_KINDS.contains(&kind.as_str()))
                     .collect();
 
                 let resolved_id = if cross_file.len() == 1 {
@@ -452,7 +474,9 @@ fn resolve_inherits(
                         imported_stems.contains(&stem)
                     });
                     let by_kind = cross_file.iter().find(|(_, _, k)| k == "Interface");
-                    in_scope.or(by_kind).or(cross_file.first())
+                    in_scope
+                        .or(by_kind)
+                        .or(cross_file.first())
                         .map(|(id, _, _)| id.clone())
                 } else {
                     None
@@ -484,15 +508,19 @@ fn resolve_inherits(
     let mut file_name_to_ids: HashMap<(String, String), Vec<String>> = HashMap::new();
     for ext in extractions {
         for sym in &ext.symbols {
-            file_name_to_ids.entry((ext.file.clone(), sym.name.clone()))
-                .or_default().push(sym.id.clone());
+            file_name_to_ids
+                .entry((ext.file.clone(), sym.name.clone()))
+                .or_default()
+                .push(sym.id.clone());
         }
     }
     for candidates in symbol_map.values() {
         for (id, file, _) in candidates {
             let name = id.rsplit("::").next().unwrap_or(id);
-            file_name_to_ids.entry((file.clone(), name.to_string()))
-                .or_default().push(id.clone());
+            file_name_to_ids
+                .entry((file.clone(), name.to_string()))
+                .or_default()
+                .push(id.clone());
         }
     }
 
@@ -504,7 +532,9 @@ fn resolve_inherits(
             } else if let Some(sep) = src.rfind("::") {
                 let file_part = &src[..sep];
                 let name_part = &src[sep + 2..];
-                if let Some(ids) = file_name_to_ids.get(&(file_part.to_string(), name_part.to_string())) {
+                if let Some(ids) =
+                    file_name_to_ids.get(&(file_part.to_string(), name_part.to_string()))
+                {
                     ids.iter()
                         .filter(|id| known_ids.contains(id.as_str()))
                         .map(|id| (id.clone(), tgt.clone()))
@@ -527,7 +557,10 @@ fn resolve_inherits(
         return Ok(0);
     }
 
-    let refs: Vec<(&str, &str)> = valid_pairs.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+    let refs: Vec<(&str, &str)> = valid_pairs
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
     let pq_path = std::env::temp_dir().join("infigraph_resolve_inherits.parquet");
     crate::graph::parquet_loader::write_edge_parquet(&pq_path, &refs)?;
     let copy_result = conn.query(&format!(
@@ -538,9 +571,10 @@ fn resolve_inherits(
         eprintln!("[resolve] COPY INHERITS FROM parquet failed ({e}), falling back to UNWIND");
         const CHUNK_SIZE: usize = 500;
         for chunk in refs.chunks(CHUNK_SIZE) {
-            let pair_list: Vec<String> = chunk.iter().map(|(a, b)| {
-                format!("{{a: '{}', b: '{}'}}", escape(a), escape(b))
-            }).collect();
+            let pair_list: Vec<String> = chunk
+                .iter()
+                .map(|(a, b)| format!("{{a: '{}', b: '{}'}}", escape(a), escape(b)))
+                .collect();
             let _ = conn.query(&format!(
                 "UNWIND [{}] AS p MATCH (a:Symbol), (b:Symbol) WHERE a.id = p.a AND b.id = p.b CREATE (a)-[:INHERITS]->(b)",
                 pair_list.join(", ")
@@ -558,7 +592,8 @@ fn import_scope_match(
     source_is_sql: bool,
 ) -> Option<String> {
     let in_scope: Vec<_> = if !imported_stems.is_empty() {
-        cross_file.iter()
+        cross_file
+            .iter()
             .filter(|(_, f, _)| {
                 let stem = std::path::Path::new(f)
                     .file_stem()
@@ -574,7 +609,8 @@ fn import_scope_match(
     if !in_scope.is_empty() {
         Some(in_scope[0].0.clone())
     } else if source_is_sql {
-        cross_file.iter()
+        cross_file
+            .iter()
             .find(|(_, _, k)| *k == "Class")
             .map(|(id, _, _)| id.clone())
     } else {

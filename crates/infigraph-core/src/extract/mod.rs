@@ -30,7 +30,13 @@ pub fn extract_file(path: &str, source: &[u8], pack: &LanguagePack) -> Result<Fi
             let relations = if pack.custom_edges.is_empty() {
                 extract_relations(path, source, root, relation_query)
             } else {
-                extract_relations_with_custom_edges(path, source, root, relation_query, &pack.custom_edges)
+                extract_relations_with_custom_edges(
+                    path,
+                    source,
+                    root,
+                    relation_query,
+                    &pack.custom_edges,
+                )
             };
             (symbols, relations)
         }

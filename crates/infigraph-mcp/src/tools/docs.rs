@@ -41,18 +41,12 @@ pub(crate) fn tool_review(args: &Value) -> Result<String> {
         .get("base_ref")
         .and_then(|v| v.as_str())
         .unwrap_or("HEAD~1");
-    let llm = args
-        .get("llm")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let llm = args.get("llm").and_then(|v| v.as_bool()).unwrap_or(false);
     let dry_run = args
         .get("dry_run")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let limit = args
-        .get("limit")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(1000) as usize;
+    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(1000) as usize;
     let context = args.get("context").and_then(|v| v.as_str());
     let group = args.get("group").and_then(|v| v.as_str());
 
@@ -153,10 +147,7 @@ pub(crate) fn tool_search_docs(args: &Value) -> Result<String> {
         .get("query")
         .and_then(|q| q.as_str())
         .context("missing 'query'")?;
-    let limit = args
-        .get("limit")
-        .and_then(|l| l.as_u64())
-        .unwrap_or(10) as usize;
+    let limit = args.get("limit").and_then(|l| l.as_u64()).unwrap_or(10) as usize;
 
     let idx = open_doc_index(args)?;
     let store = idx.store().context("doc store not initialized")?;
@@ -165,7 +156,9 @@ pub(crate) fn tool_search_docs(args: &Value) -> Result<String> {
     let results = infigraph_docs::search::hybrid_doc_search(query, store, &root, limit, 0.5)?;
 
     if results.is_empty() {
-        return Ok("No document results found. Run index_docs first to index documents.".to_string());
+        return Ok(
+            "No document results found. Run index_docs first to index documents.".to_string(),
+        );
     }
 
     // Pre-read text files to compute line numbers from byte offsets
@@ -409,10 +402,7 @@ pub(crate) fn tool_index_confluence_pages(args: &Value) -> Result<String> {
             .get("title")
             .and_then(|v| v.as_str())
             .unwrap_or("Untitled");
-        let content = page
-            .get("content")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let content = page.get("content").and_then(|v| v.as_str()).unwrap_or("");
         if content.is_empty() {
             continue;
         }
@@ -492,9 +482,7 @@ pub(crate) fn tool_watch_docs(args: &Value) -> Result<String> {
         .and_then(|v| v.as_u64())
         .unwrap_or(2000);
 
-    let root = PathBuf::from(path)
-        .canonicalize()
-        .context("invalid path")?;
+    let root = PathBuf::from(path).canonicalize().context("invalid path")?;
     let root_str = root.to_string_lossy().replace('\\', "/");
 
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
@@ -522,8 +510,7 @@ pub(crate) fn tool_watch_docs(args: &Value) -> Result<String> {
     let watcher_id_clone = watcher_id.clone();
     let log_prefix = watcher_id[..16.min(watcher_id.len())].to_string();
     std::thread::spawn(move || {
-        if let Err(e) =
-            infigraph_docs::watch::watch_docs(&root, debounce_ms, stop_rx, &log_prefix)
+        if let Err(e) = infigraph_docs::watch::watch_docs(&root, debounce_ms, stop_rx, &log_prefix)
         {
             eprintln!("[{log_prefix}] watcher error: {e}");
         }

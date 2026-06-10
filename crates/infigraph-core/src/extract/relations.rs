@@ -10,12 +10,7 @@ use crate::model::{Relation, RelationKind, Span};
 ///   @import.module / @import.name    — imports
 ///   @inherit.child / @inherit.parent — inheritance
 ///   @{custom}.source / @{custom}.target — custom edges (from language pack custom_edges)
-pub fn extract_relations(
-    file: &str,
-    source: &[u8],
-    root: Node,
-    query: &Query,
-) -> Vec<Relation> {
+pub fn extract_relations(file: &str, source: &[u8], root: Node, query: &Query) -> Vec<Relation> {
     extract_relations_with_custom_edges(file, source, root, query, &[])
 }
 
@@ -120,8 +115,7 @@ pub fn extract_relations_with_custom_edges(
                 let src_text = if let Some((_, src)) = custom_source {
                     src
                 } else if let Some(site) = custom_site_node {
-                    find_enclosing_function(site, source)
-                        .unwrap_or_else(|| file.to_string())
+                    find_enclosing_function(site, source).unwrap_or_else(|| file.to_string())
                 } else {
                     file.to_string()
                 };
@@ -150,8 +144,8 @@ pub fn extract_relations_with_custom_edges(
 
         if rel_kind == Some(RelationKind::Calls) && source_name.is_none() {
             if let Some(site) = site_node {
-                source_name = find_enclosing_function(site, source)
-                    .or_else(|| Some(file.to_string()));
+                source_name =
+                    find_enclosing_function(site, source).or_else(|| Some(file.to_string()));
             }
         }
 
@@ -249,13 +243,13 @@ fn find_enclosing_function(node: Node, source: &[u8]) -> Option<String> {
 /// Walk up the AST to find the enclosing class/struct/impl and return its name.
 fn find_enclosing_class(node: Node, source: &[u8]) -> Option<String> {
     let class_kinds = [
-        "class_definition",   // Python
-        "class_declaration",  // Java, TS, JS, C#, Kotlin, Swift
-        "class",              // Ruby
-        "class_specifier",    // C/C++
-        "impl_item",          // Rust
-        "struct_item",        // Rust
-        "defmodule",          // Elixir
+        "class_definition",  // Python
+        "class_declaration", // Java, TS, JS, C#, Kotlin, Swift
+        "class",             // Ruby
+        "class_specifier",   // C/C++
+        "impl_item",         // Rust
+        "struct_item",       // Rust
+        "defmodule",         // Elixir
     ];
     let mut current = node.parent();
     while let Some(n) = current {

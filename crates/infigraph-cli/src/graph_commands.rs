@@ -23,7 +23,11 @@ pub(crate) fn cmd_query(root: &Path, cypher: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn cmd_export(root: &Path, format: &str, output: Option<std::path::PathBuf>) -> Result<()> {
+pub(crate) fn cmd_export(
+    root: &Path,
+    format: &str,
+    output: Option<std::path::PathBuf>,
+) -> Result<()> {
     let registry = bundled_registry()?;
     let mut prism = Infigraph::open(root, registry)?;
     prism.init()?;

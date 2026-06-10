@@ -4,7 +4,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 
-use infigraph_docs::chunk::{Chunk, ChunkStrategy, chunk_document};
+use infigraph_docs::chunk::{chunk_document, Chunk, ChunkStrategy};
 use infigraph_docs::extract::{DocFormat, ExtractedDoc};
 use infigraph_docs::store::DocStore;
 
@@ -143,10 +143,8 @@ impl ConfluenceSync {
 
         // Create LINKS_TO edges
         let mut links_created = 0;
-        let all_link_data: Vec<(String, Vec<PageLink>)> = page_links
-            .into_iter()
-            .chain(link_map)
-            .collect();
+        let all_link_data: Vec<(String, Vec<PageLink>)> =
+            page_links.into_iter().chain(link_map).collect();
 
         let indexed_ids: HashSet<&str> = docs.iter().map(|d| d.file.as_str()).collect();
 
@@ -169,17 +167,20 @@ impl ConfluenceSync {
         let deleted = self.remove_deleted_pages(store, page_ids)?;
 
         let remote_ids: Vec<String> = all_pages.iter().map(|p| p.id.clone()).collect();
-        save_cursor(&cursor_path, &SyncCursor {
-            last_synced: chrono::Utc::now().to_rfc3339(),
-            source_id: self.source_id.clone(),
-            space_key: self.space_key.clone(),
-            base_url: self.client.base_url().to_string(),
-            page_ids: if let Some(ids) = page_ids {
-                ids.to_vec()
-            } else {
-                remote_ids
+        save_cursor(
+            &cursor_path,
+            &SyncCursor {
+                last_synced: chrono::Utc::now().to_rfc3339(),
+                source_id: self.source_id.clone(),
+                space_key: self.space_key.clone(),
+                base_url: self.client.base_url().to_string(),
+                page_ids: if let Some(ids) = page_ids {
+                    ids.to_vec()
+                } else {
+                    remote_ids
+                },
             },
-        })?;
+        )?;
 
         Ok(SyncResult {
             pages_fetched: fetched,
@@ -272,7 +273,9 @@ impl ConfluenceSync {
         }
 
         if let Some(c) = cursor {
-            let pages = self.client.get_pages_modified_since(&self.space_key, &c.last_synced, 1000)?;
+            let pages =
+                self.client
+                    .get_pages_modified_since(&self.space_key, &c.last_synced, 1000)?;
             if !pages.is_empty() {
                 return Ok(pages);
             }
@@ -282,7 +285,10 @@ impl ConfluenceSync {
     }
 
     #[allow(clippy::type_complexity)]
-    fn convert_pages(&self, pages: &[ConfluencePage]) -> (Vec<ExtractedDoc>, Vec<Chunk>, Vec<(String, Vec<PageLink>)>) {
+    fn convert_pages(
+        &self,
+        pages: &[ConfluencePage],
+    ) -> (Vec<ExtractedDoc>, Vec<Chunk>, Vec<(String, Vec<PageLink>)>) {
         let mut docs = Vec::new();
         let mut all_chunks = Vec::new();
         let mut page_links = Vec::new();
@@ -330,7 +336,8 @@ impl ConfluenceSync {
         let mut to_delete = Vec::new();
 
         for doc_id in &existing_docs {
-            if let Some(page_id) = doc_id.strip_prefix(&format!("confluence://{}/", self.space_key)) {
+            if let Some(page_id) = doc_id.strip_prefix(&format!("confluence://{}/", self.space_key))
+            {
                 if !remote_set.contains(page_id) {
                     to_delete.push(doc_id.as_str());
                 }
@@ -357,15 +364,24 @@ fn parse_confluence_html(page: &ConfluencePage) -> ParsedPage {
             } else if let Some(storage) = &body.storage {
                 &storage.value
             } else {
-                return ParsedPage { content: String::new(), links: Vec::new() };
+                return ParsedPage {
+                    content: String::new(),
+                    links: Vec::new(),
+                };
             }
         } else if let Some(storage) = &body.storage {
             &storage.value
         } else {
-            return ParsedPage { content: String::new(), links: Vec::new() };
+            return ParsedPage {
+                content: String::new(),
+                links: Vec::new(),
+            };
         }
     } else {
-        return ParsedPage { content: String::new(), links: Vec::new() };
+        return ParsedPage {
+            content: String::new(),
+            links: Vec::new(),
+        };
     };
 
     let mut parser = HtmlParser::new(html);
@@ -525,7 +541,11 @@ impl<'a> HtmlParser<'a> {
         self.pos += end + 1;
 
         let is_closing = tag_content.starts_with('/');
-        let tag_str = if is_closing { &tag_content[1..] } else { tag_content };
+        let tag_str = if is_closing {
+            &tag_content[1..]
+        } else {
+            tag_content
+        };
 
         let (tag_name, attrs) = split_tag(tag_str);
         let tag_lower = tag_name.to_lowercase();
@@ -542,7 +562,9 @@ impl<'a> HtmlParser<'a> {
             "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
                 self.ensure_newline();
                 let level: usize = tag[1..].parse().unwrap_or(1);
-                for _ in 0..level { self.out.push('#'); }
+                for _ in 0..level {
+                    self.out.push('#');
+                }
                 self.out.push(' ');
             }
             "p" => self.ensure_blank_line(),
@@ -599,8 +621,12 @@ impl<'a> HtmlParser<'a> {
                 self.table_rows.clear();
                 self.ensure_blank_line();
             }
-            "thead" => { self.in_header_row = true; }
-            "tbody" => { self.in_header_row = false; }
+            "thead" => {
+                self.in_header_row = true;
+            }
+            "tbody" => {
+                self.in_header_row = false;
+            }
             "tr" => {
                 self.current_row.clear();
                 self.current_cell.clear();
@@ -642,8 +668,8 @@ impl<'a> HtmlParser<'a> {
                         "code" | "noformat" => {
                             self.in_code_block = true;
                             self.code_content.clear();
-                            self.code_language = extract_attr(attrs, "language")
-                                .unwrap_or_default();
+                            self.code_language =
+                                extract_attr(attrs, "language").unwrap_or_default();
                         }
                         "expand" => {
                             self.ensure_blank_line();
@@ -673,8 +699,8 @@ impl<'a> HtmlParser<'a> {
             }
             "ac:link" => {}
             "ri:user" => {
-                if let Some(name) = extract_attr(attrs, "ri:username")
-                    .or_else(|| extract_attr(attrs, "ri:userkey"))
+                if let Some(name) =
+                    extract_attr(attrs, "ri:username").or_else(|| extract_attr(attrs, "ri:userkey"))
                 {
                     self.push_str(&format!("@{}", name));
                 }
@@ -731,12 +757,16 @@ impl<'a> HtmlParser<'a> {
             }
             "ul" => {
                 self.list_depth = self.list_depth.saturating_sub(1);
-                if self.list_depth == 0 { self.ensure_newline(); }
+                if self.list_depth == 0 {
+                    self.ensure_newline();
+                }
             }
             "ol" => {
                 self.list_depth = self.list_depth.saturating_sub(1);
                 self.ordered_list_counters.pop();
-                if self.list_depth == 0 { self.ensure_newline(); }
+                if self.list_depth == 0 {
+                    self.ensure_newline();
+                }
             }
             "li" => {}
             "th" | "td" => {
@@ -776,20 +806,19 @@ impl<'a> HtmlParser<'a> {
                     self.code_language.clear();
                 }
             }
-            "div" | "ac:structured-macro"
-                if self.in_macro => {
-                    if self.in_code_block {
-                        self.in_code_block = false;
-                        self.ensure_blank_line();
-                        self.out.push_str(&format!("```{}\n", self.code_language));
-                        self.out.push_str(self.code_content.trim());
-                        self.out.push_str("\n```\n");
-                        self.code_content.clear();
-                        self.code_language.clear();
-                    }
-                    self.in_macro = false;
-                    self.macro_name.clear();
+            "div" | "ac:structured-macro" if self.in_macro => {
+                if self.in_code_block {
+                    self.in_code_block = false;
+                    self.ensure_blank_line();
+                    self.out.push_str(&format!("```{}\n", self.code_language));
+                    self.out.push_str(self.code_content.trim());
+                    self.out.push_str("\n```\n");
+                    self.code_content.clear();
+                    self.code_language.clear();
                 }
+                self.in_macro = false;
+                self.macro_name.clear();
+            }
             "strong" | "b" => self.push_str("**"),
             "em" | "i" => self.push_char('*'),
             "u" => self.push_str("__"),
@@ -807,7 +836,9 @@ impl<'a> HtmlParser<'a> {
         }
 
         let max_cols = self.table_rows.iter().map(|r| r.len()).max().unwrap_or(0);
-        if max_cols == 0 { return; }
+        if max_cols == 0 {
+            return;
+        }
 
         let mut widths = vec![3usize; max_cols];
         for row in &self.table_rows {
@@ -899,10 +930,7 @@ fn split_tag(s: &str) -> (&str, &str) {
 }
 
 fn extract_attr(attrs: &str, name: &str) -> Option<String> {
-    let patterns = [
-        format!("{}=\"", name),
-        format!("{}='", name),
-    ];
+    let patterns = [format!("{}=\"", name), format!("{}='", name)];
     for pat in &patterns {
         if let Some(start) = attrs.find(pat.as_str()) {
             let val_start = start + pat.len();
@@ -946,7 +974,13 @@ fn classify_link(href: &str) -> PageLink {
 
     if href.contains("/browse/") || href.contains("jira") {
         let key = href.rsplit('/').next().unwrap_or("");
-        if key.contains('-') && key.split('-').next().map(|p| p.chars().all(|c| c.is_ascii_uppercase())).unwrap_or(false) {
+        if key.contains('-')
+            && key
+                .split('-')
+                .next()
+                .map(|p| p.chars().all(|c| c.is_ascii_uppercase()))
+                .unwrap_or(false)
+        {
             return PageLink {
                 page_id: None,
                 url: href.to_string(),

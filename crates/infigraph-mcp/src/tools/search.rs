@@ -9,10 +9,7 @@ use super::docs::{open_doc_index, tool_search_docs};
 use super::helpers::{find_containing_symbol, open_prism};
 
 pub(crate) fn tool_search(args: &Value) -> Result<String> {
-    let scope = args
-        .get("scope")
-        .and_then(|s| s.as_str())
-        .unwrap_or("all");
+    let scope = args.get("scope").and_then(|s| s.as_str()).unwrap_or("all");
 
     if scope == "docs" {
         return tool_search_docs(args);
@@ -30,10 +27,7 @@ pub(crate) fn tool_search(args: &Value) -> Result<String> {
         .map(str::to_lowercase);
     let file_pattern = args.get("file_pattern").and_then(|f| f.as_str());
     let path = args.get("path").and_then(|p| p.as_str()).unwrap_or(".");
-    let use_regex = args
-        .get("regex")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let use_regex = args.get("regex").and_then(|v| v.as_bool()).unwrap_or(false);
 
     let store = prism.store().context("not initialized")?;
     let conn = store.connection()?;
@@ -298,15 +292,9 @@ pub(crate) fn tool_search(args: &Value) -> Result<String> {
         if let Ok(doc_idx) = open_doc_index(args) {
             if let Some(doc_store) = doc_idx.store() {
                 let doc_limit = (limit / 2).max(5);
-                if let Ok(doc_results) =
-                    infigraph_docs::search::hybrid_doc_search(
-                        query,
-                        doc_store,
-                        &root,
-                        doc_limit,
-                        0.5,
-                    )
-                {
+                if let Ok(doc_results) = infigraph_docs::search::hybrid_doc_search(
+                    query, doc_store, &root, doc_limit, 0.5,
+                ) {
                     if !doc_results.is_empty() {
                         out.push_str("\n---\nDocument matches:\n");
                         for dr in &doc_results {
@@ -315,8 +303,7 @@ pub(crate) fn tool_search(args: &Value) -> Result<String> {
                                 "  [{}] {} (score: {:.2})\n",
                                 dr.doc_file, heading, dr.score
                             ));
-                            let snippet: String =
-                                dr.text.chars().take(200).collect();
+                            let snippet: String = dr.text.chars().take(200).collect();
                             if !snippet.is_empty() {
                                 out.push_str(&format!("    {}\n", snippet));
                             }

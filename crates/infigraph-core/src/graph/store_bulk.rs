@@ -159,7 +159,9 @@ impl GraphStore {
             ));
         }
         for (edge_name, pairs) in &custom_pairs {
-            if pairs.is_empty() { continue; }
+            if pairs.is_empty() {
+                continue;
+            }
             let _ = ensure_custom_edge_table(conn, edge_name);
             for chunk in pairs.chunks(SYM_CHUNK) {
                 let _ = conn.query(&format!(

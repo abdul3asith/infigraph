@@ -370,7 +370,11 @@ fn node_text(node: Node, source: &[u8]) -> String {
 fn extract_child_text(node: Node, field_name: &str, source: &[u8]) -> Option<String> {
     let child = node.child_by_field_name(field_name)?;
     let text = child.utf8_text(source).ok()?.trim().to_string();
-    if text.is_empty() { None } else { Some(text) }
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 fn hash_node(node: Node, source: &[u8]) -> String {
@@ -485,11 +489,7 @@ mod tests {
             "parameters should be extracted"
         );
         assert!(
-            symbols[0]
-                .parameters
-                .as_deref()
-                .unwrap()
-                .contains("name"),
+            symbols[0].parameters.as_deref().unwrap().contains("name"),
             "parameters should contain param names: {:?}",
             symbols[0].parameters
         );

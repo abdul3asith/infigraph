@@ -195,9 +195,12 @@ impl GraphStore {
             ));
         }
         for (edge_name, pairs) in &custom_pairs {
-            if pairs.is_empty() { continue; }
+            if pairs.is_empty() {
+                continue;
+            }
             let _ = ensure_custom_edge_table(conn, edge_name);
-            let pair_list: Vec<String> = pairs.iter()
+            let pair_list: Vec<String> = pairs
+                .iter()
                 .map(|(a, b)| format!("{{a: '{}', b: '{}'}}", escape(a), escape(b)))
                 .collect();
             let _ = conn.query(&format!(

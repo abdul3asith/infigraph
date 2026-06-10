@@ -30,7 +30,13 @@ pub(crate) fn cmd_visualize_symbol(root: &Path, symbol_id: &str, depth: u32) -> 
 
     let safe_name: String = symbol_id
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let output_path = prism
         .root()

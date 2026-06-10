@@ -246,9 +246,7 @@ pub fn watch_project_auto_resolve(
                                 .path
                                 .strip_prefix(&root)
                                 .map(|r| r.to_string_lossy().replace('\\', "/"))
-                                .unwrap_or_else(|_| {
-                                    evt.path.to_string_lossy().replace('\\', "/")
-                                });
+                                .unwrap_or_else(|_| evt.path.to_string_lossy().replace('\\', "/"));
                             let mut affected_files = vec![evt.path.clone()];
 
                             if let Some(store) = p.store() {
@@ -278,13 +276,11 @@ pub fn watch_project_auto_resolve(
                                             None,
                                         ) {
                                             Ok(stats) => {
-                                                eprintln!(
-                                                    "[watch {prefix}] re-resolved: {stats}"
-                                                )
+                                                eprintln!("[watch {prefix}] re-resolved: {stats}")
                                             }
-                                            Err(e) => eprintln!(
-                                                "[watch {prefix}] re-resolve failed: {e}"
-                                            ),
+                                            Err(e) => {
+                                                eprintln!("[watch {prefix}] re-resolve failed: {e}")
+                                            }
                                         }
 
                                         let changed: Vec<&str> =
@@ -292,9 +288,9 @@ pub fn watch_project_auto_resolve(
                                         match crate::embed::update_embeddings(
                                             store, &root, &changed,
                                         ) {
-                                            Ok(n) => eprintln!(
-                                                "[watch {prefix}] updated {n} embeddings"
-                                            ),
+                                            Ok(n) => {
+                                                eprintln!("[watch {prefix}] updated {n} embeddings")
+                                            }
                                             Err(e) => eprintln!(
                                                 "[watch {prefix}] embedding update failed: {e}"
                                             ),

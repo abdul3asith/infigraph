@@ -41,8 +41,7 @@ pub fn import_scip_index(
     // Used to detect when SCIP resolves differently (= a correction to learn from).
     let mut existing_calls: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
     if project_root.is_some() {
-        if let Ok(rows) = conn.query("MATCH (a:Symbol)-[:CALLS]->(b:Symbol) RETURN a.id, b.id")
-        {
+        if let Ok(rows) = conn.query("MATCH (a:Symbol)-[:CALLS]->(b:Symbol) RETURN a.id, b.id") {
             for row in rows {
                 if row.len() < 2 {
                     continue;
@@ -68,16 +67,8 @@ pub fn import_scip_index(
             let sid = row[0].to_string().trim_matches('"').to_string();
             let sfile = row[1].to_string().trim_matches('"').to_string();
             let sname = row[2].to_string().trim_matches('"').to_string();
-            let sstart: u32 = row[3]
-                .to_string()
-                .trim_matches('"')
-                .parse()
-                .unwrap_or(0);
-            let send: u32 = row[4]
-                .to_string()
-                .trim_matches('"')
-                .parse()
-                .unwrap_or(0);
+            let sstart: u32 = row[3].to_string().trim_matches('"').parse().unwrap_or(0);
+            let send: u32 = row[4].to_string().trim_matches('"').parse().unwrap_or(0);
 
             file_name_to_ids
                 .entry((sfile.clone(), sname))
@@ -172,10 +163,11 @@ pub fn import_scip_index(
                     .entry(key)
                     .or_default()
                     .push(sym_id.clone());
-                file_symbols
-                    .entry(file.clone())
-                    .or_default()
-                    .push((span.start_line, span.end_line, sym_id));
+                file_symbols.entry(file.clone()).or_default().push((
+                    span.start_line,
+                    span.end_line,
+                    sym_id,
+                ));
             }
         }
 
@@ -374,8 +366,7 @@ pub fn import_scip_index(
                             && ts_tgt.rsplit("::").next().unwrap_or(ts_tgt) == call_name
                     });
                     if ts_had_different {
-                        let source_file =
-                            container_id.split("::").next().unwrap_or(&container_id);
+                        let source_file = container_id.split("::").next().unwrap_or(&container_id);
                         learned_store.record_correction(
                             source_file,
                             call_name,
@@ -403,10 +394,7 @@ pub fn import_scip_index(
             .map(|(a, b)| (a.as_str(), b.as_str()))
             .collect();
         if parquet_loader::write_edge_parquet(&edge_pq, &refs).is_ok() {
-            if let Err(e) = conn.query(&format!(
-                "COPY CALLS FROM '{}'",
-                fwd_slash_path(&edge_pq)
-            )) {
+            if let Err(e) = conn.query(&format!("COPY CALLS FROM '{}'", fwd_slash_path(&edge_pq))) {
                 eprintln!("Auto-SCIP: COPY CALLS failed ({e}), falling back to UNWIND");
                 unwind_edges_from_pairs(&conn, &refs, "CALLS", "Symbol", "Symbol");
             }

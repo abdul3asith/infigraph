@@ -250,13 +250,16 @@ fn query_osv_batch(queries: &[OsvQuery]) -> Result<Vec<OsvResultEntry>> {
     }
 
     let body = OsvBatchRequest {
-        queries: queries.iter().map(|q| OsvQuery {
-            package: OsvPackage {
-                name: q.package.name.clone(),
-                ecosystem: q.package.ecosystem.clone(),
-            },
-            version: q.version.clone(),
-        }).collect(),
+        queries: queries
+            .iter()
+            .map(|q| OsvQuery {
+                package: OsvPackage {
+                    name: q.package.name.clone(),
+                    ecosystem: q.package.ecosystem.clone(),
+                },
+                version: q.version.clone(),
+            })
+            .collect(),
     };
 
     let body_json = serde_json::to_string(&body)?;
@@ -274,7 +277,10 @@ fn query_osv_batch(queries: &[OsvQuery]) -> Result<Vec<OsvResultEntry>> {
         Err(e) => {
             eprintln!("Warning: OSV API request failed: {e}");
             // Return empty results for each query so indexing is preserved
-            Ok(queries.iter().map(|_| OsvResultEntry { vulns: None }).collect())
+            Ok(queries
+                .iter()
+                .map(|_| OsvResultEntry { vulns: None })
+                .collect())
         }
     }
 }
@@ -339,7 +345,8 @@ pub fn scan_deps(deps: &[DepEntry]) -> Result<VulnReport> {
 
     // Sort findings: CRITICAL first, then HIGH, MEDIUM, LOW, UNKNOWN
     findings.sort_by(|a, b| {
-        severity_rank(&a.severity).cmp(&severity_rank(&b.severity))
+        severity_rank(&a.severity)
+            .cmp(&severity_rank(&b.severity))
             .then(a.dep_name.cmp(&b.dep_name))
     });
 
@@ -363,7 +370,9 @@ fn severity_rank(s: &str) -> u8 {
 /// Filter report findings by minimum severity.
 pub fn filter_by_severity(report: &mut VulnReport, min_severity: &str) {
     let min_rank = severity_rank(&min_severity.to_uppercase());
-    report.findings.retain(|f| severity_rank(&f.severity) <= min_rank);
+    report
+        .findings
+        .retain(|f| severity_rank(&f.severity) <= min_rank);
     let mut names = std::collections::HashSet::new();
     for f in &report.findings {
         names.insert(format!("{}@{}", f.dep_name, f.dep_version));
@@ -373,7 +382,9 @@ pub fn filter_by_severity(report: &mut VulnReport, min_severity: &str) {
 
 /// Filter report findings by ecosystem.
 pub fn filter_by_ecosystem(report: &mut VulnReport, ecosystem: &str) {
-    report.findings.retain(|f| f.ecosystem.eq_ignore_ascii_case(ecosystem));
+    report
+        .findings
+        .retain(|f| f.ecosystem.eq_ignore_ascii_case(ecosystem));
     let mut names = std::collections::HashSet::new();
     for f in &report.findings {
         names.insert(format!("{}@{}", f.dep_name, f.dep_version));

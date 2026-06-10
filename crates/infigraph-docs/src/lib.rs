@@ -1,9 +1,9 @@
-pub mod extract;
 pub mod chunk;
-pub mod store;
-pub mod search;
-pub mod watch;
 pub mod embed;
+pub mod extract;
+pub mod search;
+pub mod store;
+pub mod watch;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -128,7 +128,14 @@ impl DocIndex {
                 let doc = extract::extract_document(path, &bytes, &ext).ok()?;
                 let strategy = ChunkStrategy::for_extension(&ext);
                 let chunks = chunk::chunk_document(&doc, &rel, &hash, strategy);
-                Some((ExtractedDoc { file: rel, content_hash: hash, ..doc }, chunks))
+                Some((
+                    ExtractedDoc {
+                        file: rel,
+                        content_hash: hash,
+                        ..doc
+                    },
+                    chunks,
+                ))
             })
             .collect();
 

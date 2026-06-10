@@ -6,8 +6,8 @@
 use anyhow::Result;
 use serde::Serialize;
 
-use crate::graph::GraphQuery;
 use crate::graph::store::GraphStore;
+use crate::graph::GraphQuery;
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -67,7 +67,9 @@ pub fn detect_filtered(store: &GraphStore, filter: Option<&str>) -> Result<Patte
     let mut report = detect_all(store)?;
     if let Some(name) = filter {
         let lower = name.to_lowercase();
-        report.patterns.retain(|p| p.pattern.to_lowercase() == lower);
+        report
+            .patterns
+            .retain(|p| p.pattern.to_lowercase() == lower);
     }
     Ok(report)
 }
@@ -89,23 +91,18 @@ pub fn format_report(report: &PatternReport) -> String {
             if matches.len() == 1 { "" } else { "s" }
         ));
         for (i, m) in matches.iter().enumerate() {
-            out.push_str(&format!(
-                "\n  {}. [{}] {}\n",
-                i + 1,
-                m.confidence,
-                m.file
-            ));
+            out.push_str(&format!("\n  {}. [{}] {}\n", i + 1, m.confidence, m.file));
             for p in &m.participants {
-                out.push_str(&format!(
-                    "     {:<14} {} ({})\n",
-                    p.role, p.symbol, p.file
-                ));
+                out.push_str(&format!("     {:<14} {} ({})\n", p.role, p.symbol, p.file));
             }
         }
     }
 
     let total: usize = groups.iter().map(|(_, v)| v.len()).sum();
-    out.push_str(&format!("\nTotal: {} pattern instance(s) detected.\n", total));
+    out.push_str(&format!(
+        "\nTotal: {} pattern instance(s) detected.\n",
+        total
+    ));
     out
 }
 
@@ -312,8 +309,7 @@ fn detect_observer(gq: &GraphQuery) -> Vec<PatternMatch> {
     }
 
     // Build set of parent classes that have register methods
-    let mut register_parents =
-        std::collections::HashMap::<String, (String, String)>::new();
+    let mut register_parents = std::collections::HashMap::<String, (String, String)>::new();
     for row in &reg_rows {
         if row.len() < 3 {
             continue;
@@ -403,10 +399,8 @@ fn detect_strategy(gq: &GraphQuery) -> Vec<PatternMatch> {
     };
 
     // Group implementations by interface
-    let mut iface_impls: std::collections::HashMap<
-        String,
-        (String, Vec<(String, String)>),
-    > = std::collections::HashMap::new();
+    let mut iface_impls: std::collections::HashMap<String, (String, Vec<(String, String)>)> =
+        std::collections::HashMap::new();
 
     for row in &rows {
         if row.len() < 4 {

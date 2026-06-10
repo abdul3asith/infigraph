@@ -72,9 +72,11 @@ impl LearnedStore {
         resolved_to_file: &str,
         resolved_to_symbol: &str,
     ) {
-        if let Some(existing) = self.patterns.iter_mut().find(|p| {
-            p.source_file == source_file && p.call_name == call_name
-        }) {
+        if let Some(existing) = self
+            .patterns
+            .iter_mut()
+            .find(|p| p.source_file == source_file && p.call_name == call_name)
+        {
             existing.resolved_to_file = resolved_to_file.to_string();
             existing.resolved_to_symbol = resolved_to_symbol.to_string();
             existing.confidence = (existing.confidence + 0.1).min(1.0);
@@ -96,9 +98,7 @@ impl LearnedStore {
     /// Only returns patterns with confidence >= 0.3.
     pub fn lookup(&self, source_file: &str, call_name: &str) -> Option<&LearnedPattern> {
         self.patterns.iter().find(|p| {
-            p.source_file == source_file
-                && p.call_name == call_name
-                && p.confidence >= 0.3
+            p.source_file == source_file && p.call_name == call_name && p.confidence >= 0.3
         })
     }
 
@@ -141,7 +141,12 @@ mod tests {
     #[test]
     fn test_record_and_lookup() {
         let mut store = LearnedStore::default();
-        store.record_correction("main.py", "authenticate", "auth.py", "auth.py::authenticate");
+        store.record_correction(
+            "main.py",
+            "authenticate",
+            "auth.py",
+            "auth.py::authenticate",
+        );
 
         let found = store.lookup("main.py", "authenticate");
         assert!(found.is_some());
@@ -153,9 +158,24 @@ mod tests {
     #[test]
     fn test_repeated_correction_increases_confidence() {
         let mut store = LearnedStore::default();
-        store.record_correction("main.py", "authenticate", "auth.py", "auth.py::authenticate");
-        store.record_correction("main.py", "authenticate", "auth.py", "auth.py::authenticate");
-        store.record_correction("main.py", "authenticate", "auth.py", "auth.py::authenticate");
+        store.record_correction(
+            "main.py",
+            "authenticate",
+            "auth.py",
+            "auth.py::authenticate",
+        );
+        store.record_correction(
+            "main.py",
+            "authenticate",
+            "auth.py",
+            "auth.py::authenticate",
+        );
+        store.record_correction(
+            "main.py",
+            "authenticate",
+            "auth.py",
+            "auth.py::authenticate",
+        );
 
         let p = store.lookup("main.py", "authenticate").unwrap();
         assert!((p.confidence - 0.7).abs() < f32::EPSILON);

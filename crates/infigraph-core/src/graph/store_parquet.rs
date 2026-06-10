@@ -234,8 +234,10 @@ impl GraphStore {
         let mut imp_pairs: Vec<(String, String)> = Vec::new();
         let mut reads_pairs: Vec<(String, String)> = Vec::new();
         let mut writes_pairs: Vec<(String, String)> = Vec::new();
-        let mut custom_seen: std::collections::HashMap<String, std::collections::HashSet<(String, String)>> =
-            std::collections::HashMap::new();
+        let mut custom_seen: std::collections::HashMap<
+            String,
+            std::collections::HashSet<(String, String)>,
+        > = std::collections::HashMap::new();
         let mut custom_pairs: std::collections::HashMap<String, Vec<(String, String)>> =
             std::collections::HashMap::new();
 
@@ -288,10 +290,17 @@ impl GraphStore {
                         }
                     }
                     RelationKind::Custom(name) => {
-                        if known_ids.contains(&src) && known_ids.contains(&tgt)
-                            && custom_seen.entry(name.clone()).or_default().insert((src.clone(), tgt.clone()))
+                        if known_ids.contains(&src)
+                            && known_ids.contains(&tgt)
+                            && custom_seen
+                                .entry(name.clone())
+                                .or_default()
+                                .insert((src.clone(), tgt.clone()))
                         {
-                            custom_pairs.entry(name.clone()).or_default().push((src, tgt));
+                            custom_pairs
+                                .entry(name.clone())
+                                .or_default()
+                                .push((src, tgt));
                         }
                     }
                     _ => {
@@ -452,17 +461,28 @@ impl GraphStore {
 
         // Custom edge tables
         for (edge_name, pairs) in &custom_pairs {
-            if pairs.is_empty() { continue; }
+            if pairs.is_empty() {
+                continue;
+            }
             let _ = super::schema::ensure_custom_edge_table(&conn, edge_name);
-            let edge_pq = tmp.join(format!("infigraph_index_{}.parquet", edge_name.to_lowercase()));
+            let edge_pq = tmp.join(format!(
+                "infigraph_index_{}.parquet",
+                edge_name.to_lowercase()
+            ));
             let refs: Vec<(&str, &str)> = pairs
                 .iter()
                 .map(|(a, b)| (a.as_str(), b.as_str()))
                 .collect();
             parquet_loader::write_edge_parquet(&edge_pq, &refs)?;
-            if let Err(e) = conn.query(&format!("COPY {} FROM '{}'", edge_name, fwd_slash_path(&edge_pq)))
-            {
-                eprintln!("warn: COPY {} via parquet failed ({e}), falling back to UNWIND", edge_name);
+            if let Err(e) = conn.query(&format!(
+                "COPY {} FROM '{}'",
+                edge_name,
+                fwd_slash_path(&edge_pq)
+            )) {
+                eprintln!(
+                    "warn: COPY {} via parquet failed ({e}), falling back to UNWIND",
+                    edge_name
+                );
                 unwind_edges_from_pairs(&conn, &refs, edge_name, "Symbol", "Symbol");
             }
             let _ = std::fs::remove_file(&edge_pq);

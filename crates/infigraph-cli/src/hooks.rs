@@ -519,8 +519,7 @@ pub(crate) fn uninstall_claude_allowlist(home: &std::path::Path) -> Result<()> {
     }
 
     let content = std::fs::read_to_string(&settings_path)?;
-    let mut settings: serde_json::Value =
-        serde_json::from_str(&content).unwrap_or(json!({}));
+    let mut settings: serde_json::Value = serde_json::from_str(&content).unwrap_or(json!({}));
 
     let existing: Vec<String> = settings["permissions"]
         .get("allow")

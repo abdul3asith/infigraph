@@ -51,9 +51,7 @@ impl QualityMetrics {
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(0);
 
-        let canonical = root
-            .canonicalize()
-            .unwrap_or_else(|_| root.to_path_buf());
+        let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
         let (critical, high, medium, low) = match crate::security::scan_project(&canonical) {
             Ok(scan) => (
                 scan.critical_count(),
@@ -92,7 +90,10 @@ impl QualityMetrics {
         out.push_str(&format!("  calls_edges         {}\n", self.calls_edges));
         out.push_str(&format!("  inherits_edges      {}\n", self.inherits_edges));
         out.push_str(&format!("  dead_code           {}\n", self.dead_code_count));
-        out.push_str(&format!("  security_critical   {}\n", self.security_critical));
+        out.push_str(&format!(
+            "  security_critical   {}\n",
+            self.security_critical
+        ));
         out.push_str(&format!("  security_high       {}\n", self.security_high));
         out.push_str(&format!("  security_medium     {}\n", self.security_medium));
         out.push_str(&format!("  security_low        {}\n", self.security_low));
@@ -139,7 +140,12 @@ pub fn compare(baseline: &QualityMetrics, current: &QualityMetrics) -> Vec<Compa
     vec![
         compare_metric("symbols", baseline.symbols, current.symbols, false),
         compare_metric("modules", baseline.modules, current.modules, false),
-        compare_metric("calls_edges", baseline.calls_edges, current.calls_edges, false),
+        compare_metric(
+            "calls_edges",
+            baseline.calls_edges,
+            current.calls_edges,
+            false,
+        ),
         compare_metric(
             "inherits_edges",
             baseline.inherits_edges,
@@ -192,8 +198,7 @@ fn compare_metric(
             format!("+{current}")
         }
     } else {
-        let pct =
-            ((current as f64 - baseline as f64) / baseline as f64 * 100.0) as i64;
+        let pct = ((current as f64 - baseline as f64) / baseline as f64 * 100.0) as i64;
         if pct == 0 {
             "same".to_string()
         } else if pct > 0 {

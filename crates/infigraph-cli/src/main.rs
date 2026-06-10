@@ -642,8 +642,7 @@ fn run(command: Commands, root: &Path) -> Result<()> {
             json,
             checks,
         } => {
-            let any_failed =
-                cmd_check(root, config.as_deref(), json, checks.as_deref())?;
+            let any_failed = cmd_check(root, config.as_deref(), json, checks.as_deref())?;
             if any_failed {
                 std::process::exit(1);
             }
@@ -708,14 +707,9 @@ fn run(command: Commands, root: &Path) -> Result<()> {
             } else {
                 match infigraph_core::bench::load_baseline(root) {
                     Some(baseline) => {
-                        let results =
-                            infigraph_core::bench::compare(&baseline.metrics, &current);
-                        print!(
-                            "{}",
-                            infigraph_core::bench::format_comparison(&results)
-                        );
-                        let regressions =
-                            results.iter().filter(|r| r.regression).count();
+                        let results = infigraph_core::bench::compare(&baseline.metrics, &current);
+                        print!("{}", infigraph_core::bench::format_comparison(&results));
+                        let regressions = results.iter().filter(|r| r.regression).count();
                         if regressions > 0 {
                             println!("\n  {} regression(s) detected!", regressions);
                             std::process::exit(1);

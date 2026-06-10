@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::graph::{GraphQuery, store::GraphStore};
+use crate::graph::{store::GraphStore, GraphQuery};
 use crate::lang::LanguageRegistry;
 use crate::Infigraph;
 

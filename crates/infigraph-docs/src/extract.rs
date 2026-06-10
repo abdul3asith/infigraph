@@ -66,9 +66,11 @@ pub fn extract_document(path: &Path, bytes: &[u8], ext: &str) -> Result<Extracte
     };
 
     let (text, title, page_count) = match format {
-        DocFormat::Markdown | DocFormat::PlainText | DocFormat::Rst | DocFormat::Asciidoc | DocFormat::Org => {
-            extract_text(bytes)?
-        }
+        DocFormat::Markdown
+        | DocFormat::PlainText
+        | DocFormat::Rst
+        | DocFormat::Asciidoc
+        | DocFormat::Org => extract_text(bytes)?,
         DocFormat::Pdf => extract_pdf(path, bytes)?,
         DocFormat::Docx => extract_docx(bytes)?,
         DocFormat::Pptx => extract_pptx(bytes)?,
@@ -90,9 +92,11 @@ pub fn extract_document(path: &Path, bytes: &[u8], ext: &str) -> Result<Extracte
 
 fn extract_text(bytes: &[u8]) -> Result<(String, Option<String>, Option<usize>)> {
     let text = String::from_utf8_lossy(bytes).into_owned();
-    let title = text.lines().next().map(|l| {
-        l.trim_start_matches('#').trim().to_string()
-    }).filter(|t| !t.is_empty());
+    let title = text
+        .lines()
+        .next()
+        .map(|l| l.trim_start_matches('#').trim().to_string())
+        .filter(|t| !t.is_empty());
     Ok((text, title, None))
 }
 
@@ -100,20 +104,27 @@ fn extract_pdf(path: &Path, bytes: &[u8]) -> Result<(String, Option<String>, Opt
     let page_count = count_pdf_pages(bytes);
     let text = pdf_extract::extract_text_from_mem(bytes)
         .with_context(|| format!("PDF text extraction failed: {}", path.display()))?;
-    let title = text.lines().next().map(|l| l.trim().to_string()).filter(|t| !t.is_empty());
+    let title = text
+        .lines()
+        .next()
+        .map(|l| l.trim().to_string())
+        .filter(|t| !t.is_empty());
     Ok((text, title, page_count))
 }
 
 fn count_pdf_pages(bytes: &[u8]) -> Option<usize> {
     let needle = b"/Type /Page";
     let count = bytes.windows(needle.len()).filter(|w| *w == needle).count();
-    if count > 0 { Some(count) } else { None }
+    if count > 0 {
+        Some(count)
+    } else {
+        None
+    }
 }
 
 fn extract_docx(bytes: &[u8]) -> Result<(String, Option<String>, Option<usize>)> {
     let cursor = std::io::Cursor::new(bytes);
-    let mut archive = zip::ZipArchive::new(cursor)
-        .context("DOCX is not a valid ZIP archive")?;
+    let mut archive = zip::ZipArchive::new(cursor).context("DOCX is not a valid ZIP archive")?;
 
     let mut text = String::new();
     let mut title = None;
@@ -122,7 +133,11 @@ fn extract_docx(bytes: &[u8]) -> Result<(String, Option<String>, Option<usize>)>
         let mut xml = String::new();
         std::io::Read::read_to_string(&mut file, &mut xml)?;
         text = extract_text_from_ooxml(&xml);
-        title = text.lines().next().map(|l| l.trim().to_string()).filter(|t| !t.is_empty());
+        title = text
+            .lines()
+            .next()
+            .map(|l| l.trim().to_string())
+            .filter(|t| !t.is_empty());
     }
 
     Ok((text, title, None))
@@ -130,8 +145,7 @@ fn extract_docx(bytes: &[u8]) -> Result<(String, Option<String>, Option<usize>)>
 
 fn extract_pptx(bytes: &[u8]) -> Result<(String, Option<String>, Option<usize>)> {
     let cursor = std::io::Cursor::new(bytes);
-    let mut archive = zip::ZipArchive::new(cursor)
-        .context("PPTX is not a valid ZIP archive")?;
+    let mut archive = zip::ZipArchive::new(cursor).context("PPTX is not a valid ZIP archive")?;
 
     let mut all_text = Vec::new();
     let mut slide_names: Vec<String> = Vec::new();
@@ -159,14 +173,18 @@ fn extract_pptx(bytes: &[u8]) -> Result<(String, Option<String>, Option<usize>)>
     }
 
     let text = all_text.join("\n\n");
-    let title = text.lines().next().map(|l| l.trim().to_string()).filter(|t| !t.is_empty());
+    let title = text
+        .lines()
+        .next()
+        .map(|l| l.trim().to_string())
+        .filter(|t| !t.is_empty());
     Ok((text, title, page_count))
 }
 
 fn extract_xlsx(bytes: &[u8]) -> Result<(String, Option<String>, Option<usize>)> {
     let cursor = std::io::Cursor::new(bytes);
-    let mut workbook = calamine::open_workbook_auto_from_rs(cursor)
-        .context("Failed to open spreadsheet")?;
+    let mut workbook =
+        calamine::open_workbook_auto_from_rs(cursor).context("Failed to open spreadsheet")?;
 
     let mut all_text = Vec::new();
     let sheet_names: Vec<String> = workbook.sheet_names().to_vec();
@@ -176,10 +194,7 @@ fn extract_xlsx(bytes: &[u8]) -> Result<(String, Option<String>, Option<usize>)>
         if let Ok(range) = workbook.worksheet_range(name) {
             let mut sheet_text = format!("Sheet: {}\n", name);
             for row in range.rows() {
-                let cells: Vec<String> = row
-                    .iter()
-                    .map(|cell| format!("{}", cell))
-                    .collect();
+                let cells: Vec<String> = row.iter().map(|cell| format!("{}", cell)).collect();
                 let line = cells.join("\t");
                 if !line.trim().is_empty() {
                     sheet_text.push_str(&line);
@@ -256,7 +271,11 @@ fn extract_rtf(bytes: &[u8]) -> Result<(String, Option<String>, Option<usize>)> 
     }
 
     let text = text.trim().to_string();
-    let title = text.lines().next().map(|l| l.trim().to_string()).filter(|t| !t.is_empty());
+    let title = text
+        .lines()
+        .next()
+        .map(|l| l.trim().to_string())
+        .filter(|t| !t.is_empty());
     Ok((text, title, None))
 }
 
@@ -317,7 +336,8 @@ fn extract_text_from_ooxml(xml: &str) -> String {
 
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(quick_xml::events::Event::Start(ref e)) | Ok(quick_xml::events::Event::Empty(ref e)) => {
+            Ok(quick_xml::events::Event::Start(ref e))
+            | Ok(quick_xml::events::Event::Empty(ref e)) => {
                 let local = e.local_name();
                 let name = std::str::from_utf8(local.as_ref()).unwrap_or("");
                 if name == "t" {

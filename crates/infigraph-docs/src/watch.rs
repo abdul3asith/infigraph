@@ -14,8 +14,7 @@ pub fn watch_docs(
     log_prefix: &str,
 ) -> Result<()> {
     let (tx, rx) = mpsc::channel();
-    let config = Config::default()
-        .with_poll_interval(Duration::from_millis(debounce_ms));
+    let config = Config::default().with_poll_interval(Duration::from_millis(debounce_ms));
     let mut watcher = notify::RecommendedWatcher::new(tx, config)?;
     watcher.watch(root, RecursiveMode::Recursive)?;
 

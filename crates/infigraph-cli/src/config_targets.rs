@@ -15,23 +15,75 @@ pub(crate) struct AgentTarget {
 }
 
 pub(crate) const AGENT_TARGETS: &[AgentTarget] = &[
-    AgentTarget { dir_name: ".claude",   config_file: "CLAUDE_CODE_SPECIAL", format: ConfigFormat::Json, label: "Claude Code" },
-    AgentTarget { dir_name: ".cursor",   config_file: "mcp.json",    format: ConfigFormat::Json, label: "Cursor" },
-    AgentTarget { dir_name: ".vscode",   config_file: "mcp.json",    format: ConfigFormat::Json, label: "VS Code" },
-    AgentTarget { dir_name: ".codex",    config_file: "config.toml", format: ConfigFormat::Toml, label: "Codex" },
-    AgentTarget { dir_name: ".gemini",   config_file: "settings.json", format: ConfigFormat::Json, label: "Gemini CLI" },
-    AgentTarget { dir_name: ".zed",      config_file: "mcp.json",    format: ConfigFormat::Json, label: "Zed" },
-    AgentTarget { dir_name: ".opencode", config_file: "config.json", format: ConfigFormat::Json, label: "OpenCode" },
-    AgentTarget { dir_name: ".aider",    config_file: "mcp.json",    format: ConfigFormat::Json, label: "Aider" },
-    AgentTarget { dir_name: ".windsurf", config_file: "mcp.json",    format: ConfigFormat::Json, label: "Windsurf" },
-    AgentTarget { dir_name: ".kiro",     config_file: "mcp.json",    format: ConfigFormat::Json, label: "Kiro" },
-    AgentTarget { dir_name: ".copilot",  config_file: "mcp.json",    format: ConfigFormat::Json, label: "GitHub Copilot CLI" },
+    AgentTarget {
+        dir_name: ".claude",
+        config_file: "CLAUDE_CODE_SPECIAL",
+        format: ConfigFormat::Json,
+        label: "Claude Code",
+    },
+    AgentTarget {
+        dir_name: ".cursor",
+        config_file: "mcp.json",
+        format: ConfigFormat::Json,
+        label: "Cursor",
+    },
+    AgentTarget {
+        dir_name: ".vscode",
+        config_file: "mcp.json",
+        format: ConfigFormat::Json,
+        label: "VS Code",
+    },
+    AgentTarget {
+        dir_name: ".codex",
+        config_file: "config.toml",
+        format: ConfigFormat::Toml,
+        label: "Codex",
+    },
+    AgentTarget {
+        dir_name: ".gemini",
+        config_file: "settings.json",
+        format: ConfigFormat::Json,
+        label: "Gemini CLI",
+    },
+    AgentTarget {
+        dir_name: ".zed",
+        config_file: "mcp.json",
+        format: ConfigFormat::Json,
+        label: "Zed",
+    },
+    AgentTarget {
+        dir_name: ".opencode",
+        config_file: "config.json",
+        format: ConfigFormat::Json,
+        label: "OpenCode",
+    },
+    AgentTarget {
+        dir_name: ".aider",
+        config_file: "mcp.json",
+        format: ConfigFormat::Json,
+        label: "Aider",
+    },
+    AgentTarget {
+        dir_name: ".windsurf",
+        config_file: "mcp.json",
+        format: ConfigFormat::Json,
+        label: "Windsurf",
+    },
+    AgentTarget {
+        dir_name: ".kiro",
+        config_file: "mcp.json",
+        format: ConfigFormat::Json,
+        label: "Kiro",
+    },
+    AgentTarget {
+        dir_name: ".copilot",
+        config_file: "mcp.json",
+        format: ConfigFormat::Json,
+        label: "GitHub Copilot CLI",
+    },
 ];
 
-pub(crate) fn install_json_target(
-    config_path: &std::path::Path,
-    mcp_path_str: &str,
-) -> Result<()> {
+pub(crate) fn install_json_target(config_path: &std::path::Path, mcp_path_str: &str) -> Result<()> {
     let mut config: serde_json::Value = if config_path.is_file() {
         let content = std::fs::read_to_string(config_path)
             .with_context(|| format!("Failed to read {}", config_path.display()))?;
@@ -57,10 +109,7 @@ pub(crate) fn install_json_target(
     Ok(())
 }
 
-pub(crate) fn install_toml_target(
-    config_path: &std::path::Path,
-    mcp_path_str: &str,
-) -> Result<()> {
+pub(crate) fn install_toml_target(config_path: &std::path::Path, mcp_path_str: &str) -> Result<()> {
     let existing = if config_path.is_file() {
         std::fs::read_to_string(config_path)
             .with_context(|| format!("Failed to read {}", config_path.display()))?
@@ -81,7 +130,12 @@ pub(crate) fn install_toml_target(
             .find("\n[")
             .map(|pos| after_header + pos + 1)
             .unwrap_or(existing.len());
-        format!("{}{}{}", &existing[..start], mcp_block, &existing[section_end..])
+        format!(
+            "{}{}{}",
+            &existing[..start],
+            mcp_block,
+            &existing[section_end..]
+        )
     } else {
         let sep = if existing.ends_with('\n') { "" } else { "\n" };
         format!("{}{}\n{}", existing, sep, mcp_block)
@@ -112,7 +166,11 @@ pub(crate) fn uninstall_json_target<'a>(
             let pretty = serde_json::to_string_pretty(&config)?;
             std::fs::write(config_path, pretty.as_bytes())
                 .with_context(|| format!("Failed to write {}", config_path.display()))?;
-            println!("  Removed infigraph from {} ({})", label, config_path.display());
+            println!(
+                "  Removed infigraph from {} ({})",
+                label,
+                config_path.display()
+            );
             return Ok(Some(label));
         } else {
             println!("  Skipping {} (infigraph entry not found)", label);
@@ -154,7 +212,11 @@ pub(crate) fn uninstall_toml_target<'a>(
             };
             std::fs::write(config_path, final_content.as_bytes())
                 .with_context(|| format!("Failed to write {}", config_path.display()))?;
-            println!("  Removed infigraph from {} ({})", label, config_path.display());
+            println!(
+                "  Removed infigraph from {} ({})",
+                label,
+                config_path.display()
+            );
             return Ok(Some(label));
         } else {
             println!("  Skipping {} (infigraph entry not found in [mcp])", label);

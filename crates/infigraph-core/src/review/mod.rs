@@ -198,8 +198,8 @@ pub fn review(
     }
 
     // 2. Semantic diff: get changed symbols
-    let symbol_diff = diff::semantic_diff(&canonical, base_ref, "HEAD", registry)
-        .unwrap_or_default();
+    let symbol_diff =
+        diff::semantic_diff(&canonical, base_ref, "HEAD", registry).unwrap_or_default();
 
     let changed_symbols: Vec<ChangedSymbol> = symbol_diff
         .changes
@@ -351,7 +351,8 @@ pub fn review_with_group(
     report.blast_radius.extend(cross_repo_blast);
 
     // 5. Re-filter affected tests from expanded blast radius
-    let cross_repo_tests: Vec<AffectedSymbol> = report.blast_radius
+    let cross_repo_tests: Vec<AffectedSymbol> = report
+        .blast_radius
         .iter()
         .filter(|s| is_test_symbol(s) && s.file.starts_with('['))
         .cloned()
@@ -369,7 +370,9 @@ pub fn review_with_group(
                  WHERE t.name = '{escaped_name}' \
                  RETURN t.name LIMIT 1"
             );
-            if let Ok(results) = group_registry.group_query(group_name, &calls_query, &build_registry) {
+            if let Ok(results) =
+                group_registry.group_query(group_name, &calls_query, &build_registry)
+            {
                 if results.iter().any(|(_, rows)| !rows.is_empty()) {
                     alive_names.insert(dc.name.clone());
                     continue;
@@ -382,14 +385,17 @@ pub fn review_with_group(
                  EXISTS {{ MATCH (m:Symbol) WHERE m.name = '{escaped_name}' AND m.parent = p.id }} \
                  RETURN s.name LIMIT 1"
             );
-            if let Ok(results) = group_registry.group_query(group_name, &inh_query, &build_registry) {
+            if let Ok(results) = group_registry.group_query(group_name, &inh_query, &build_registry)
+            {
                 if results.iter().any(|(_, rows)| !rows.is_empty()) {
                     alive_names.insert(dc.name.clone());
                 }
             }
         }
         if !alive_names.is_empty() {
-            report.dead_code.retain(|dc| !alive_names.contains(&dc.name));
+            report
+                .dead_code
+                .retain(|dc| !alive_names.contains(&dc.name));
         }
     }
 
@@ -418,7 +424,11 @@ pub fn review_with_group(
     for (name, locations) in &cross_repo_names {
         if locations.len() >= 2 {
             report.consistency_issues.push(ConsistencyIssue {
-                pattern: format!("{} exists in {} repos — verify all updated", name, locations.len()),
+                pattern: format!(
+                    "{} exists in {} repos — verify all updated",
+                    name,
+                    locations.len()
+                ),
                 expected_count: locations.len(),
                 actual_count: 0,
                 outliers: locations.clone(),
@@ -630,19 +640,42 @@ fn detect_pr_type(
     // Commit message signals
     for (pr_type, score) in &mut scores {
         match pr_type {
-            PrType::BugFix if commit_msgs.contains("fix") || commit_msgs.contains("bug") || commit_msgs.contains("patch") => {
+            PrType::BugFix
+                if commit_msgs.contains("fix")
+                    || commit_msgs.contains("bug")
+                    || commit_msgs.contains("patch") =>
+            {
                 *score += 3;
             }
-            PrType::Refactor if commit_msgs.contains("refactor") || commit_msgs.contains("rename") || commit_msgs.contains("move") || commit_msgs.contains("clean") => {
+            PrType::Refactor
+                if commit_msgs.contains("refactor")
+                    || commit_msgs.contains("rename")
+                    || commit_msgs.contains("move")
+                    || commit_msgs.contains("clean") =>
+            {
                 *score += 3;
             }
-            PrType::Feature if commit_msgs.contains("add") || commit_msgs.contains("new") || commit_msgs.contains("feature") || commit_msgs.contains("implement") => {
+            PrType::Feature
+                if commit_msgs.contains("add")
+                    || commit_msgs.contains("new")
+                    || commit_msgs.contains("feature")
+                    || commit_msgs.contains("implement") =>
+            {
                 *score += 3;
             }
-            PrType::Migration if commit_msgs.contains("migrat") || commit_msgs.contains("upgrade") || commit_msgs.contains("convert") || commit_msgs.contains("sqlite") => {
+            PrType::Migration
+                if commit_msgs.contains("migrat")
+                    || commit_msgs.contains("upgrade")
+                    || commit_msgs.contains("convert")
+                    || commit_msgs.contains("sqlite") =>
+            {
                 *score += 5;
             }
-            PrType::Config if commit_msgs.contains("config") || commit_msgs.contains("setting") || commit_msgs.contains("version bump") => {
+            PrType::Config
+                if commit_msgs.contains("config")
+                    || commit_msgs.contains("setting")
+                    || commit_msgs.contains("version bump") =>
+            {
                 *score += 3;
             }
             PrType::Test if commit_msgs.contains("test") => {
@@ -656,40 +689,95 @@ fn detect_pr_type(
     }
 
     // File pattern signals
-    let test_files = changed_files.iter().filter(|f| f.contains("test") || f.contains("spec")).count();
-    let config_files = changed_files.iter().filter(|f| {
-        f.ends_with(".json") || f.ends_with(".xml") || f.ends_with(".yaml") || f.ends_with(".yml")
-            || f.ends_with(".csproj") || f.ends_with(".sln") || f.ends_with(".cfg") || f.ends_with(".pkg")
-    }).count();
-    let doc_files = changed_files.iter().filter(|f| f.ends_with(".md") || f.ends_with(".txt") || f.ends_with(".rst")).count();
-    let schema_files = changed_files.iter().filter(|f| f.contains("schema") || f.contains("migration") || f.contains("sql")).count();
+    let test_files = changed_files
+        .iter()
+        .filter(|f| f.contains("test") || f.contains("spec"))
+        .count();
+    let config_files = changed_files
+        .iter()
+        .filter(|f| {
+            f.ends_with(".json")
+                || f.ends_with(".xml")
+                || f.ends_with(".yaml")
+                || f.ends_with(".yml")
+                || f.ends_with(".csproj")
+                || f.ends_with(".sln")
+                || f.ends_with(".cfg")
+                || f.ends_with(".pkg")
+        })
+        .count();
+    let doc_files = changed_files
+        .iter()
+        .filter(|f| f.ends_with(".md") || f.ends_with(".txt") || f.ends_with(".rst"))
+        .count();
+    let schema_files = changed_files
+        .iter()
+        .filter(|f| f.contains("schema") || f.contains("migration") || f.contains("sql"))
+        .count();
 
     if test_files as f32 / changed_files.len().max(1) as f32 > 0.7 {
-        scores.iter_mut().find(|(t, _)| *t == PrType::Test).unwrap().1 += 5;
+        scores
+            .iter_mut()
+            .find(|(t, _)| *t == PrType::Test)
+            .unwrap()
+            .1 += 5;
     }
     if config_files as f32 / changed_files.len().max(1) as f32 > 0.7 {
-        scores.iter_mut().find(|(t, _)| *t == PrType::Config).unwrap().1 += 5;
+        scores
+            .iter_mut()
+            .find(|(t, _)| *t == PrType::Config)
+            .unwrap()
+            .1 += 5;
     }
     if doc_files as f32 / changed_files.len().max(1) as f32 > 0.7 {
-        scores.iter_mut().find(|(t, _)| *t == PrType::Docs).unwrap().1 += 5;
+        scores
+            .iter_mut()
+            .find(|(t, _)| *t == PrType::Docs)
+            .unwrap()
+            .1 += 5;
     }
     if schema_files > 0 {
-        scores.iter_mut().find(|(t, _)| *t == PrType::Migration).unwrap().1 += 3;
+        scores
+            .iter_mut()
+            .find(|(t, _)| *t == PrType::Migration)
+            .unwrap()
+            .1 += 3;
     }
 
     // Symbol change signals
-    let moved = changed_symbols.iter().filter(|s| s.change_kind.starts_with("MOVED")).count();
-    let removed = changed_symbols.iter().filter(|s| s.change_kind == "REMOVED").count();
-    let added_count = changed_symbols.iter().filter(|s| s.change_kind == "ADDED").count();
+    let moved = changed_symbols
+        .iter()
+        .filter(|s| s.change_kind.starts_with("MOVED"))
+        .count();
+    let removed = changed_symbols
+        .iter()
+        .filter(|s| s.change_kind == "REMOVED")
+        .count();
+    let added_count = changed_symbols
+        .iter()
+        .filter(|s| s.change_kind == "ADDED")
+        .count();
 
     if moved as f32 / symbol_count_safe(changed_symbols) > 0.3 {
-        scores.iter_mut().find(|(t, _)| *t == PrType::Refactor).unwrap().1 += 3;
+        scores
+            .iter_mut()
+            .find(|(t, _)| *t == PrType::Refactor)
+            .unwrap()
+            .1 += 3;
     }
     if added_count as f32 / symbol_count_safe(changed_symbols) > 0.5 {
-        scores.iter_mut().find(|(t, _)| *t == PrType::Feature).unwrap().1 += 3;
+        scores
+            .iter_mut()
+            .find(|(t, _)| *t == PrType::Feature)
+            .unwrap()
+            .1 += 3;
     }
     if removed as f32 / symbol_count_safe(changed_symbols) > 0.3 {
-        scores.iter_mut().find(|(t, _)| *t == PrType::Refactor).unwrap().1 += 2;
+        scores
+            .iter_mut()
+            .find(|(t, _)| *t == PrType::Refactor)
+            .unwrap()
+            .1 += 2;
     }
 
     scores.sort_by_key(|a| std::cmp::Reverse(a.1));
@@ -723,10 +811,22 @@ fn build_intent_string(
     changed_files: &[String],
     changed_symbols: &[ChangedSymbol],
 ) -> String {
-    let added = changed_symbols.iter().filter(|s| s.change_kind == "ADDED").count();
-    let removed = changed_symbols.iter().filter(|s| s.change_kind == "REMOVED").count();
-    let modified = changed_symbols.iter().filter(|s| s.change_kind == "SIGNATURE_CHANGED").count();
-    let moved = changed_symbols.iter().filter(|s| s.change_kind.starts_with("MOVED")).count();
+    let added = changed_symbols
+        .iter()
+        .filter(|s| s.change_kind == "ADDED")
+        .count();
+    let removed = changed_symbols
+        .iter()
+        .filter(|s| s.change_kind == "REMOVED")
+        .count();
+    let modified = changed_symbols
+        .iter()
+        .filter(|s| s.change_kind == "SIGNATURE_CHANGED")
+        .count();
+    let moved = changed_symbols
+        .iter()
+        .filter(|s| s.change_kind.starts_with("MOVED"))
+        .count();
 
     let file_types: HashSet<&str> = changed_files
         .iter()
@@ -736,16 +836,27 @@ fn build_intent_string(
 
     format!(
         "{} {} PR: {} files ({}) changed, {} symbols (+{} -{} ~{} →{})",
-        scope, pr_type,
+        scope,
+        pr_type,
         changed_files.len(),
-        langs.iter().map(|l| format!(".{}", l)).collect::<Vec<_>>().join(", "),
+        langs
+            .iter()
+            .map(|l| format!(".{}", l))
+            .collect::<Vec<_>>()
+            .join(", "),
         changed_symbols.len(),
-        added, removed, modified, moved,
+        added,
+        removed,
+        modified,
+        moved,
     )
 }
 
 /// Find functions/methods in changed files that have zero callers.
-fn find_dead_code_in_changed_files(gq: &GraphQuery, changed_files: &[String]) -> Vec<DeadCodeSymbol> {
+fn find_dead_code_in_changed_files(
+    gq: &GraphQuery,
+    changed_files: &[String],
+) -> Vec<DeadCodeSymbol> {
     if changed_files.is_empty() {
         return vec![];
     }
@@ -824,7 +935,10 @@ fn find_clones_in_changed_files(gq: &GraphQuery, changed_files: &[String]) -> Ve
 
 /// Find consistency issues: groups of changed symbols with similar names
 /// that should follow the same pattern but have different structures.
-fn find_consistency_issues(gq: &GraphQuery, changed_symbols: &[ChangedSymbol]) -> Vec<ConsistencyIssue> {
+fn find_consistency_issues(
+    gq: &GraphQuery,
+    changed_symbols: &[ChangedSymbol],
+) -> Vec<ConsistencyIssue> {
     let mut issues = Vec::new();
 
     // Group symbols by name — find cases where the same method exists in multiple files
@@ -872,7 +986,8 @@ fn find_consistency_issues(gq: &GraphQuery, changed_symbols: &[ChangedSymbol]) -
                  WHERE s.name = '{escaped_name}' AND s.file ENDS WITH '{escaped_file}' \
                  RETURN count(c)"
             );
-            let count: usize = gq.raw_query(&query)
+            let count: usize = gq
+                .raw_query(&query)
                 .ok()
                 .and_then(|rows| rows.first()?.first()?.parse().ok())
                 .unwrap_or(0);
@@ -895,7 +1010,12 @@ fn find_consistency_issues(gq: &GraphQuery, changed_symbols: &[ChangedSymbol]) -
                 let diff = (*c).abs_diff(median_count);
                 diff > 2 && median_count > 0
             })
-            .map(|(file, count)| format!("{} in {} ({} callers vs median {})", name, file, count, median_count))
+            .map(|(file, count)| {
+                format!(
+                    "{} in {} ({} callers vs median {})",
+                    name, file, count, median_count
+                )
+            })
             .collect();
 
         if !structural_outliers.is_empty() {
@@ -919,10 +1039,7 @@ fn find_consistency_issues(gq: &GraphQuery, changed_symbols: &[ChangedSymbol]) -
 pub fn format_review(report: &ReviewReport) -> String {
     let mut out = String::new();
 
-    out.push_str(&format!(
-        "## PR Review: {}..HEAD\n\n",
-        report.base_ref,
-    ));
+    out.push_str(&format!("## PR Review: {}..HEAD\n\n", report.base_ref,));
 
     // Context
     out.push_str(&format!(
@@ -956,10 +1073,7 @@ pub fn format_review(report: &ReviewReport) -> String {
         out.push_str("  (none)\n");
     } else {
         for sym in &report.blast_radius {
-            out.push_str(&format!(
-                "  {} {} ({})\n",
-                sym.kind, sym.name, sym.file,
-            ));
+            out.push_str(&format!("  {} {} ({})\n", sym.kind, sym.name, sym.file,));
         }
     }
     out.push('\n');
@@ -973,10 +1087,7 @@ pub fn format_review(report: &ReviewReport) -> String {
         out.push_str("  (none)\n");
     } else {
         for sym in &report.affected_tests {
-            out.push_str(&format!(
-                "  {} ({})\n",
-                sym.name, sym.file,
-            ));
+            out.push_str(&format!("  {} ({})\n", sym.name, sym.file,));
         }
     }
     out.push('\n');
@@ -1041,19 +1152,13 @@ pub fn format_review(report: &ReviewReport) -> String {
         out.push_str("  (none)\n");
     } else {
         for d in &report.dead_code {
-            out.push_str(&format!(
-                "  {} {} ({})\n",
-                d.kind, d.name, d.file,
-            ));
+            out.push_str(&format!("  {} {} ({})\n", d.kind, d.name, d.file,));
         }
     }
     out.push('\n');
 
     // Code clones
-    out.push_str(&format!(
-        "### Code Clones ({})\n",
-        report.code_clones.len(),
-    ));
+    out.push_str(&format!("### Code Clones ({})\n", report.code_clones.len(),));
     if report.code_clones.is_empty() {
         out.push_str("  (none)\n");
     } else {
