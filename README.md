@@ -8,6 +8,26 @@
 
 Built in Rust. Zero LLM dependency. Runs locally. No API keys. No network calls.
 
+---
+
+## Table of Contents
+
+- [The Problem](#the-problem) — What Infigraph solves
+- [Why Infigraph](#why-infigraph-what-makes-it-unique) — Unique market position
+- [The Solution](#the-solution) — How it works
+- [Key Highlights](#key-highlights) — Core capabilities at a glance
+- [Quick Start](#quick-start) — Install and run in 2 minutes
+- [How It Works](#how-it-works) — Integration with AI coding agents
+- [Offline-First Design](#offline-first-design) — No APIs, no network calls
+- [Installation](#installation) — Setup for all platforms
+- [Usage Examples](#usage-examples) — CLI commands, Web UI, tasks
+- [Features & Architecture](#features--architecture) — Full capabilities list
+- [Supported Languages (62)](#supported-languages-62) — All 62 languages
+- [Contributing](#contributing) — Build from source, add languages, contribute
+- [License](#license)
+
+---
+
 ## The Problem
 
 AI agents are **structurally blind** to your codebase. When they need to answer "who calls this function?" or "what breaks if I change this class?", they have to re-read files, retrace imports, and re-infer relationships — wasting time and tokens.
@@ -69,24 +89,6 @@ Examples:
   "Who calls validate_user?" → 1ms instead of 5s file reads
   "Blast radius of this change?" → Complete call graph traversal
 ```
-
----
-
-## Table of Contents
-
-- [The Problem](#the-problem) — What Infigraph solves
-- [Why Infigraph](#why-infigraph-what-makes-it-unique) — Unique market position
-- [The Solution](#the-solution) — How it works
-- [Key Highlights](#key-highlights) — Core capabilities at a glance
-- [Quick Start](#quick-start) — Install and run in 2 minutes
-- [How It Works](#how-it-works) — Integration with AI coding agents
-- [Offline-First Design](#offline-first-design) — No APIs, no network calls
-- [Installation](#installation) — Setup for all platforms
-- [Usage Examples](#usage-examples) — CLI commands, Web UI, tasks
-- [Features & Architecture](#features--architecture) — Full capabilities list
-- [Supported Languages (62)](#supported-languages-62) — All 62 languages
-- [Contributing](#contributing) — Build from source, add languages, contribute
-- [License](#license)
 
 ---
 
