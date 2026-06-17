@@ -7,6 +7,8 @@ pub struct SessionData {
     pub id: String,
     pub summary: String,
     #[serde(default)]
+    pub name: String,
+    #[serde(default)]
     pub pending_tasks: String,
     #[serde(default)]
     pub decisions: String,
@@ -89,6 +91,11 @@ impl SessionStore {
         Ok(sessions)
     }
 
+    pub fn load_by_name(&self, name: &str) -> Result<Option<SessionData>> {
+        let id = format!("named_{}", name.to_lowercase().replace(' ', "_"));
+        self.load(&id)
+    }
+
     pub fn delete(&self, session_id: &str) -> Result<()> {
         let path = self.session_path(session_id);
         if path.exists() {
@@ -129,6 +136,7 @@ impl SessionStore {
             let updated: i64 = get(6).parse().unwrap_or(created);
             collected.push(SessionData {
                 id,
+                name: String::new(),
                 summary: get(1),
                 pending_tasks: get(2),
                 decisions: get(3),
@@ -188,6 +196,7 @@ mod tests {
     fn make_session(id: &str, created_at: i64, updated_at: i64) -> SessionData {
         SessionData {
             id: id.to_string(),
+            name: String::new(),
             summary: format!("work on {id}"),
             pending_tasks: String::new(),
             decisions: String::new(),

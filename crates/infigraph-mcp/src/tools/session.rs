@@ -93,9 +93,14 @@ pub fn tool_save_session(args: &Value) -> Result<String> {
         .unwrap_or("");
     let blockers = args.get("blockers").and_then(|s| s.as_str()).unwrap_or("");
     let narrative = args.get("narrative").and_then(|s| s.as_str()).unwrap_or("");
+    let session_name = args.get("name").and_then(|s| s.as_str()).unwrap_or("");
 
     let now = session_epoch();
-    let session_id = session_date_id();
+    let session_id = if session_name.is_empty() {
+        session_date_id()
+    } else {
+        format!("named_{}", session_name.to_lowercase().replace(' ', "_"))
+    };
 
     let new_files: Vec<&str> = files_touched
         .split(',')
@@ -126,6 +131,7 @@ pub fn tool_save_session(args: &Value) -> Result<String> {
 
         SessionData {
             id: session_id.clone(),
+            name: session_name.to_string(),
             summary: summary.to_string(),
             pending_tasks: pending_tasks.to_string(),
             decisions: merged_decisions,
@@ -139,6 +145,7 @@ pub fn tool_save_session(args: &Value) -> Result<String> {
     } else {
         SessionData {
             id: session_id.clone(),
+            name: session_name.to_string(),
             summary: summary.to_string(),
             pending_tasks: pending_tasks.to_string(),
             decisions: decisions.to_string(),
@@ -180,7 +187,11 @@ pub fn tool_save_session(args: &Value) -> Result<String> {
     emb_store.push((session_id.clone(), vec));
     embed::save_embeddings(&emb_path, &emb_store)?;
 
-    Ok(format!("Session saved: {session_id}"))
+    if session_name.is_empty() {
+        Ok(format!("Session saved: {session_id}"))
+    } else {
+        Ok(format!("Session saved: {session_id} (name: {session_name})"))
+    }
 }
 
 pub const CLUSTER_GAP_SECS: i64 = 72 * 3600;
@@ -220,7 +231,11 @@ pub fn format_session_output(
     } else {
         out.push_str(&format!("## Session {} of {}\n\n", idx + 1, total));
     }
-    out.push_str(&format!("**Session:** {}\n\n", session.id));
+    if !session.name.is_empty() {
+        out.push_str(&format!("**Session:** {} (name: **{}**)\n\n", session.id, session.name));
+    } else {
+        out.push_str(&format!("**Session:** {}\n\n", session.id));
+    }
     if !session.summary.is_empty() {
         out.push_str(&format!("**Summary:** {}\n\n", session.summary));
     }
@@ -329,7 +344,18 @@ pub fn append_old_session_hint(sessions_dir: &std::path::Path, out: &mut String)
 pub fn tool_get_latest_session(args: &Value) -> Result<String> {
     let path = args.get("path").and_then(|p| p.as_str()).unwrap_or(".");
     let explicit_limit = args.get("limit").and_then(|v| v.as_u64());
+    let session_name = args.get("name").and_then(|s| s.as_str()).unwrap_or("");
     let store = open_session_store(args)?;
+
+    if !session_name.is_empty() {
+        return if let Some(session) = store.load_by_name(session_name)? {
+            let mut out = format_session_output(&session, 0, 1, path);
+            append_activity_log(&mut out, path);
+            Ok(out)
+        } else {
+            Ok(format!("No session found with name '{session_name}'."))
+        };
+    }
 
     let sessions = if let Some(limit) = explicit_limit {
         store.list_recent(limit as usize)?
@@ -511,6 +537,7 @@ mod tests {
     fn make_session(id: &str, created_at: i64, updated_at: i64) -> SessionData {
         SessionData {
             id: id.to_string(),
+            name: String::new(),
             summary: format!("work on {id}"),
             pending_tasks: String::new(),
             decisions: String::new(),

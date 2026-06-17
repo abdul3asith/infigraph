@@ -3,6 +3,7 @@ use infigraph_core::graph::{SessionStore, SessionData};
 fn make_session(id: &str, created_at: i64, updated_at: i64) -> SessionData {
     SessionData {
         id: id.to_string(),
+        name: String::new(),
         summary: format!("work on {id}"),
         pending_tasks: String::new(),
         decisions: String::new(),

@@ -277,9 +277,10 @@ fn build_tools_list() -> Vec<Value> {
             p(true,false,false,json!({"file":{"type":"string","description":"Optional: filter to symbols in files matching this substring"},"limit":{"type":"integer","default":10,"description":"Max number of target symbols to return (default: 10)"}})), &["path"]),
         tool_def("generate_sequence_diagram", "PRIMARY: Generate Mermaid sequence diagram from call graph. Use to visualize control flow through a function. Participants = files, messages = calls.",
             p(true,true,false,json!({"depth":{"type":"integer","default":3,"description":"Max call depth to traverse (default: 3)"}})), &["path","symbol_id"]),
-        tool_def("save_session", "Save session context to a dedicated session DB for cross-session continuity. Stores Session node + semantic embedding. Multiple calls per day merge: summary/pending_tasks/constraints/assumptions/blockers overwrite, decisions append, files_touched union. Use `narrative` for full session story — written to .infigraph/sessions/session_YYYY-MM-DD.md and embedded for semantic search.",
+        tool_def("save_session", "Save session context to a dedicated session DB for cross-session continuity. Stores Session node + semantic embedding. Multiple calls per day merge: summary/pending_tasks/constraints/assumptions/blockers overwrite, decisions append, files_touched union. Use `narrative` for full session story — written to .infigraph/sessions/session_YYYY-MM-DD.md and embedded for semantic search. Use `name` to save a named session that can be recalled later by identity.",
             p(true,false,false,json!({
                 "summary":{"type":"string","description":"Brief summary of what was accomplished this session"},
+                "name":{"type":"string","description":"Optional name/label for this session (e.g. 'perf-optimization', 'auth-refactor'). Named sessions are stored separately from daily auto-saves and can be recalled by name via get_latest_session."},
                 "pending_tasks":{"type":"string","description":"Tasks remaining / next steps"},
                 "decisions":{"type":"string","description":"Structured decisions: 'Goal: X. Decision: Y. Why: Z. Invalidates-if: W.' Use | to separate multiple decisions"},
                 "files_touched":{"type":"string","description":"Comma-separated list of files modified"},
@@ -288,8 +289,8 @@ fn build_tools_list() -> Vec<Value> {
                 "blockers":{"type":"string","description":"Stuck items needing human input or external dependency"},
                 "narrative":{"type":"string","description":"Full session story: what was explored, found, reasoned, decided, and why. Raw chronological dump. Appended to .infigraph/sessions/session_YYYY-MM-DD.md with timestamp. Use for rich context recovery in future sessions."}
             })), &["path","summary"]),
-        tool_def("get_latest_session", "Retrieve recent session context from graph DB. Call at START of every new session to resume where you left off. Returns summary, pending tasks, decisions, files touched, and linked file details. Use limit>1 to see session history.",
-            p(true,false,false,json!({"limit":{"type":"integer","default":1,"description":"Number of recent sessions to return (default: 1)"}})), &["path"]),
+        tool_def("get_latest_session", "Retrieve recent session context from graph DB. Call at START of every new session to resume where you left off. Returns summary, pending tasks, decisions, files touched, and linked file details. Use limit>1 to see session history. Use name to recall a specific named session.",
+            p(true,false,false,json!({"limit":{"type":"integer","default":1,"description":"Number of recent sessions to return (default: 1)"},"name":{"type":"string","description":"Recall a named session by its label (e.g. 'perf-optimization'). If provided, returns that specific session instead of the most recent."}})), &["path"]),
         tool_def("purge_sessions", "Delete sessions older than specified days. Use to clean up old session history.",
             p(true,false,false,json!({
                 "older_than_days":{"type":"integer","default":30,"description":"Delete sessions older than this many days (default: 30)"}
