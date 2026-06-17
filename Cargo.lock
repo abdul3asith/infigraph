@@ -5262,8 +5262,7 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-vb6"
-version = "0.0.1"
-source = "git+https://github.com/andersonm3ai/tree-sitter-vb6?rev=cfe941a25a2589cbfdcda35956857eeb4d0bf3e9#cfe941a25a2589cbfdcda35956857eeb4d0bf3e9"
+version = "0.0.2"
 dependencies = [
  "cc",
  "tree-sitter",

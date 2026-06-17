@@ -1,0 +1,21 @@
+[package]
+name = "tree-sitter-vb6"
+version = "0.0.2"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/intuit/infigraph"
+homepage = "https://intuit.github.io/infigraph/"
+keywords = ["tree-sitter", "parser", "vb6", "visual-basic", "grammar"]
+categories = ["parsing", "text-editors"]
+description = "VB6 (Visual Basic 6) grammar for tree-sitter"
+readme = "README.md"
+include = ["src/**", "Cargo.toml", "build.rs", "LICENSE", "README.md"]
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+tree-sitter = ">=0.22.6"
+
+[build-dependencies]
+cc = "1"
