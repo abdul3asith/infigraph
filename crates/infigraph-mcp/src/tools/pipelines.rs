@@ -42,7 +42,7 @@ pub fn tool_pipeline_deps(args: &Value) -> Result<String> {
     let idx = open_doc_index(args)?;
     let store = idx.store().context("DocStore not initialized")?;
 
-    let deps = store.get_pipeline_deps_v2()?;
+    let deps = store.get_pipeline_deps()?;
     if deps.is_empty() {
         return Ok("No pipeline dependencies found. Run pipeline indexing first.".to_string());
     }
@@ -67,7 +67,7 @@ pub fn tool_pipeline_impact(args: &Value) -> Result<String> {
         .and_then(|v| v.as_u64())
         .unwrap_or(3) as u32;
 
-    let results = store.impact_analysis_v2(table_name, max_depth)?;
+    let results = store.impact_analysis(table_name, max_depth)?;
     if results.is_empty() {
         return Ok(format!(
             "No pipelines impacted by table '{table_name}'."

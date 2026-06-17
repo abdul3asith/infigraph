@@ -1,7 +1,24 @@
 use regex::Regex;
 use serde_json::Value;
 
-use infigraph_docs::store::PipelineRecord;
+#[derive(Debug, Clone, Default)]
+pub struct PipelineRecord {
+    pub id: String,
+    pub name: String,
+    pub doc_id: String,
+    pub source_systems: String,
+    pub dest_tables: String,
+    pub scheduler_type: String,
+    pub scheduler_config: String,
+    pub compliance: String,
+    pub github_repo: String,
+    pub daci: String,
+    pub idempotent: String,
+    pub business_logic_summary: String,
+    pub data_quality: String,
+    pub dependencies_upstream: String,
+    pub dependencies_downstream: String,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Section {
