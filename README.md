@@ -1,5 +1,9 @@
 # Infigraph
 
+<div align="center">
+  <img src="branding-system/logos/infigraph-light.png" alt="Infigraph" width="600" />
+</div>
+
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.70%2B-orange)](https://www.rust-lang.org/)
 [![GitHub Release](https://img.shields.io/github/v/release/intuit/infigraph?sort=semver)](https://github.com/intuit/infigraph/releases)
@@ -7,6 +11,26 @@
 **AST-powered code intelligence engine.** Indexes codebases into a persistent knowledge graph with full Cypher queries, hybrid semantic search, cross-file call resolution, and **62 programming languages**.
 
 Built in Rust. Zero LLM dependency. Runs locally. No API keys. No network calls.
+
+---
+
+## Table of Contents
+
+- [The Problem](#the-problem) — What Infigraph solves
+- [Why Infigraph](#why-infigraph-what-makes-it-unique) — Unique market position
+- [The Solution](#the-solution) — How it works
+- [Key Highlights](#key-highlights) — Core capabilities at a glance
+- [Quick Start](#quick-start) — Install and run in 2 minutes
+- [How It Works](#how-it-works) — Integration with AI coding agents
+- [Offline-First Design](#offline-first-design) — No APIs, no network calls
+- [Installation](#installation) — Setup for all platforms
+- [Usage Examples](#usage-examples) — CLI commands, Web UI, tasks
+- [Features & Architecture](#features--architecture) — Full capabilities list
+- [Supported Languages (62)](#supported-languages-62) — All 62 languages
+- [Contributing](#contributing) — Build from source, add languages, contribute
+- [License](#license)
+
+---
 
 ## The Problem
 
@@ -69,24 +93,6 @@ Examples:
   "Who calls validate_user?" → 1ms instead of 5s file reads
   "Blast radius of this change?" → Complete call graph traversal
 ```
-
----
-
-## Table of Contents
-
-- [The Problem](#the-problem) — What Infigraph solves
-- [Why Infigraph](#why-infigraph-what-makes-it-unique) — Unique market position
-- [The Solution](#the-solution) — How it works
-- [Key Highlights](#key-highlights) — Core capabilities at a glance
-- [Quick Start](#quick-start) — Install and run in 2 minutes
-- [How It Works](#how-it-works) — Integration with AI coding agents
-- [Offline-First Design](#offline-first-design) — No APIs, no network calls
-- [Installation](#installation) — Setup for all platforms
-- [Usage Examples](#usage-examples) — CLI commands, Web UI, tasks
-- [Features & Architecture](#features--architecture) — Full capabilities list
-- [Supported Languages (62)](#supported-languages-62) — All 62 languages
-- [Contributing](#contributing) — Build from source, add languages, contribute
-- [License](#license)
 
 ---
 
@@ -955,9 +961,31 @@ const ATTR_KINDS: &[&str] = &[
 - `order-service/` — TypeScript Express (4 files, 5 routes)
 - `payment-service/` — Rust Actix-web (5 files, 4 routes)
 
+## Documentation
+
+The documentation site is built with Jekyll (Just the Docs theme) and deployed to GitHub Pages.
+
+**To develop the docs locally:**
+```bash
+./scripts/setup-docs.sh  # One-time: copy branding assets
+cd docs && bundle install && bundle exec jekyll serve
+```
+
+Visit `http://localhost:4000/infigraph/` to view the site.
+
+See [docs/README.md](docs/README.md) for detailed documentation setup instructions.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for build instructions, code style, and how to add a language or submit a PR.
+
+---
+
+<div align="center">
+  <img src="branding-system/banners/bottom-banner1-light.png" alt="Infigraph Footer" width="600" />
+</div>
+
+---
 
 ## License
 

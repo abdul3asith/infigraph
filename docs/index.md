@@ -6,6 +6,8 @@ nav_order: 1
 
 # Infigraph
 
+<img src="/infigraph/assets/branding/hero-banner.png" alt="Infigraph" />
+
 **AST-powered code intelligence engine.** Indexes codebases into a persistent knowledge graph with full Cypher queries, hybrid semantic search, cross-file call resolution, and **62 programming languages**.
 
 Built in Rust. Zero LLM dependency. Runs locally. No API keys. No network calls.
@@ -130,4 +132,4 @@ Then ask your AI coding agent:
 
 ---
 
-Built with ❤️ by [Intuit](https://intuit.com)
+<img src="/infigraph/assets/branding/footer-banner.png" alt="Infigraph Footer" />
