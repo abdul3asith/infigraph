@@ -64,9 +64,13 @@ fn test_doc_index_root() {
     let idx = DocIndex::open(tmp.path()).unwrap();
     let expected = tmp.path().canonicalize().unwrap();
     let root_str = idx.root().to_string_lossy().to_string();
-    let expected_str = expected.to_string_lossy().to_string();
+    let mut expected_str = expected.to_string_lossy().to_string();
+    // macOS: canonicalize() may prepend /private to /var/folders tmpdir
+    expected_str = expected_str.trim_start_matches("/private").to_string();
+    // Windows: canonicalize() prepends \\?\ extended-length path prefix
+    expected_str = expected_str.trim_start_matches(r"\\?\").to_string();
     assert!(
-        root_str.ends_with(expected_str.trim_start_matches("/private")),
+        root_str.ends_with(&expected_str),
         "root {root_str} should match {expected_str}"
     );
 }
