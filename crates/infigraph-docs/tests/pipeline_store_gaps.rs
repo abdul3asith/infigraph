@@ -62,15 +62,11 @@ fn test_doc_format_as_str_all() {
 fn test_doc_index_root() {
     let tmp = tempfile::tempdir().unwrap();
     let idx = DocIndex::open(tmp.path()).unwrap();
+    let root = idx.root().canonicalize().unwrap_or_else(|_| idx.root().to_path_buf());
     let expected = tmp.path().canonicalize().unwrap();
-    let root_str = idx.root().to_string_lossy().to_string();
-    let mut expected_str = expected.to_string_lossy().to_string();
-    // macOS: canonicalize() may prepend /private to /var/folders tmpdir
-    expected_str = expected_str.trim_start_matches("/private").to_string();
-    // Windows: canonicalize() prepends \\?\ extended-length path prefix
-    expected_str = expected_str.trim_start_matches(r"\\?\").to_string();
-    assert!(
-        root_str.ends_with(&expected_str),
-        "root {root_str} should match {expected_str}"
+    assert_eq!(
+        root, expected,
+        "root {:?} should match {:?}",
+        root, expected
     );
 }
