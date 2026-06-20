@@ -43,6 +43,7 @@ fn make_extraction(file: &str) -> FileExtraction {
 }
 
 #[test]
+#[ignore] // perf test — run via pre-commit hook, not CI
 fn test_lock_overhead_under_1ms() {
     let (_dir, store) = make_store();
 
@@ -62,6 +63,7 @@ fn test_lock_overhead_under_1ms() {
 }
 
 #[test]
+#[ignore] // perf test — run via pre-commit hook, not CI
 fn test_contended_lock_throughput() {
     let (_dir, store) = make_store();
     let store = Arc::new(store);
@@ -94,10 +96,9 @@ fn test_contended_lock_throughput() {
     }
     let multi_thread = start.elapsed();
 
-    // 4 threads doing 4x total work — should be < 16x single-thread time
-    // (NTFS file locking has higher contention overhead than Unix flock)
+    // 4 threads doing 4x total work — should be < 8x single-thread time
     assert!(
-        multi_thread < single_thread * 16,
+        multi_thread < single_thread * 8,
         "contended throughput too slow: single={:?}, 4-thread={:?}",
         single_thread,
         multi_thread
@@ -105,6 +106,7 @@ fn test_contended_lock_throughput() {
 }
 
 #[test]
+#[ignore] // perf test — run via pre-commit hook, not CI
 fn test_no_perf_regression_upsert_file() {
     let (_dir, store) = make_store();
 
