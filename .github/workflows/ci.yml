@@ -39,5 +39,4 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
       - name: Test
-        if: runner.os != 'Windows' # TODO: re-enable after Windows cache is warm
         run: cargo test --all
