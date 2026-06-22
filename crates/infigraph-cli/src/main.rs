@@ -2,12 +2,14 @@ mod agent;
 mod analysis_commands;
 mod commands;
 mod config_targets;
+mod git_commands;
 mod graph_commands;
 mod group_commands;
 mod hooks;
 mod index;
 mod info_commands;
 mod install;
+mod pipeline_commands;
 mod scip_download;
 mod search_commands;
 mod viz_commands;
@@ -130,6 +132,18 @@ enum Commands {
         /// Balance between BM25 (0.0) and vector (1.0)
         #[arg(short, long, default_value = "0.3")]
         alpha: f32,
+    },
+
+    /// Show all direct callers of a symbol
+    Callers {
+        /// Symbol ID (e.g. "auth.py::authenticate")
+        symbol: String,
+    },
+
+    /// Show all symbols called by a given symbol
+    Callees {
+        /// Symbol ID
+        symbol: String,
     },
 
     /// Detect potentially dead code (functions/methods with no callers)
@@ -373,6 +387,35 @@ enum Commands {
         file: Option<String>,
     },
 
+    /// Detect near-duplicate functions via vector similarity
+    Clones {
+        /// Similarity threshold (0.0-1.0, default 0.92)
+        #[arg(short, long, default_value = "0.92")]
+        threshold: f64,
+        /// Max clone pairs to return
+        #[arg(short, long, default_value = "20")]
+        limit: usize,
+    },
+
+    /// Detect cross-cutting concerns from annotations/decorators
+    #[command(alias = "xcut")]
+    Concerns {
+        /// Filter: Authorization, Validation, Caching, Transaction, etc.
+        #[arg(short, long)]
+        kind: Option<String>,
+    },
+
+    /// Detect config-driven conditional resolution (@Profile, process.env, etc.)
+    #[command(alias = "config")]
+    ConfigBindings {
+        /// Filter: Profile, Qualifier, Environment, etc.
+        #[arg(short, long)]
+        kind: Option<String>,
+        /// Filter by profile name
+        #[arg(short, long)]
+        profile: Option<String>,
+    },
+
     /// Symbol-level diff between two git refs (added/removed/signature-changed/moved symbols)
     #[command(alias = "sdiff")]
     SemanticDiff {
@@ -405,6 +448,39 @@ enum Commands {
         /// Max recommendations
         #[arg(short, long, default_value = "10")]
         limit: usize,
+    },
+
+    /// Detect reflection/dynamic invocation sites
+    Reflection {
+        /// Filter: ClassForName, ServiceLoader, Getattr, etc.
+        #[arg(short, long)]
+        mechanism: Option<String>,
+    },
+
+    /// Taint analysis: trace data from sources to sinks
+    Taint {
+        /// Filter: SqlInjection, CommandInjection, XssRisk, PathTraversal, etc.
+        #[arg(short, long)]
+        category: Option<String>,
+        /// Include sanitized flows
+        #[arg(long)]
+        show_sanitized: bool,
+        /// Run inter-procedural analysis (follows call chains)
+        #[arg(long)]
+        inter: bool,
+        /// Max call chain depth for inter-procedural (default: 5)
+        #[arg(short, long, default_value = "5")]
+        depth: u32,
+    },
+
+    /// Detect dynamic URL construction in HTTP clients
+    DynamicUrls,
+
+    /// Multi-layer path traversal detection
+    PathTraversal {
+        /// Max call chain depth (default: 5)
+        #[arg(short, long, default_value = "5")]
+        depth: u32,
     },
 
     /// Run CI checks (security, complexity, dead-code) against configurable thresholds
@@ -464,6 +540,14 @@ enum Commands {
     /// Clear all learned resolution patterns (from SCIP corrections)
     Forget,
 
+    /// Detect cross-language boundaries (FFI, JNI, gRPC, etc.)
+    #[command(alias = "ffi")]
+    Bridges {
+        /// Filter by kind: FFI, JNI, CGO, GRPC, P_INVOKE, CTYPES, WASM, COM
+        #[arg(short, long)]
+        kind: Option<String>,
+    },
+
     /// Promote BRIDGE_TO edges to CALLS edges where both endpoints are resolved symbols
     #[command(alias = "promote-bridges")]
     BridgesPromote,
@@ -496,6 +580,46 @@ enum Commands {
 
     /// Remove cached SCIP runtime binaries (Node.js, JRE, .NET SDK, Dart SDK, PHP)
     CleanRuntimes,
+
+    /// Symbol-level commit history (which functions were added/removed/modified per commit)
+    #[command(alias = "git")]
+    GitSummary {
+        /// Number of recent commits to analyze
+        #[arg(short, long, default_value = "10")]
+        commits: usize,
+        /// Filter by commit author
+        #[arg(short, long)]
+        author: Option<String>,
+        /// Filter by file path
+        #[arg(short, long)]
+        file: Option<String>,
+    },
+
+    /// List indexed files (optionally filtered by glob pattern)
+    Files {
+        /// Glob pattern (e.g. "*.rs", "src/**/*.py")
+        #[arg(short, long)]
+        glob: Option<String>,
+    },
+
+    /// Generate focused test context for a file (symbols, callers, coverage)
+    TestContext {
+        /// File to generate test context for
+        #[arg(short, long)]
+        file: Option<String>,
+        /// Max symbols to include
+        #[arg(short, long, default_value = "20")]
+        limit: usize,
+    },
+
+    /// Delete the project's .infigraph data and deregister from repo list
+    Delete,
+
+    /// Pipeline analysis (plugins, deps, impact, compliance, query)
+    Pipeline {
+        #[command(subcommand)]
+        action: PipelineAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -537,6 +661,38 @@ pub(crate) enum GroupAction {
         /// Debounce interval in milliseconds
         #[arg(short, long, default_value = "500")]
         debounce: u64,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum PipelineAction {
+    /// List discovered pipeline plugins
+    Plugins,
+    /// Show pipeline dependency graph
+    Deps,
+    /// Impact analysis: what pipelines are affected by changing a table
+    Impact {
+        /// Table name to analyze
+        table: String,
+        /// Max traversal depth
+        #[arg(short, long, default_value = "5")]
+        depth: u32,
+    },
+    /// Check pipeline compliance against a plugin's schema
+    Compliance {
+        /// Scope to check (e.g. "production")
+        scope: String,
+        /// Plugin ID to check against
+        plugin_id: String,
+    },
+    /// Query pipeline metadata by plugin field value
+    Query {
+        /// Plugin ID
+        plugin_id: String,
+        /// Field to match
+        field: String,
+        /// Value to match
+        value: String,
     },
 }
 
@@ -582,6 +738,8 @@ fn run(command: Commands, root: &Path) -> Result<()> {
             limit,
             alpha,
         } => cmd_search(root, &query, limit, alpha),
+        Commands::Callers { symbol } => cmd_callers(root, &symbol),
+        Commands::Callees { symbol } => cmd_callees(root, &symbol),
         Commands::DeadCode => cmd_dead_code(root),
         Commands::Impact { symbol, depth } => cmd_impact(root, &symbol, depth),
         Commands::Install => cmd_install(),
@@ -660,6 +818,11 @@ fn run(command: Commands, root: &Path) -> Result<()> {
         Commands::Complexity { threshold, file } => {
             cmd_complexity(root, threshold, file.as_deref())
         }
+        Commands::Clones { threshold, limit } => cmd_clones(root, threshold, limit),
+        Commands::Concerns { kind } => cmd_concerns(root, kind.as_deref()),
+        Commands::ConfigBindings { kind, profile } => {
+            cmd_config_bindings(root, kind.as_deref(), profile.as_deref())
+        }
         Commands::SemanticDiff { old, new } => cmd_semantic_diff(root, &old, &new),
         Commands::Sequence { symbol_id, depth } => cmd_sequence(root, &symbol_id, depth),
         Commands::Refactor {
@@ -667,6 +830,15 @@ fn run(command: Commands, root: &Path) -> Result<()> {
             focus,
             limit,
         } => cmd_refactor(root, target.as_deref(), &focus, limit),
+        Commands::Reflection { mechanism } => cmd_reflection(root, mechanism.as_deref()),
+        Commands::Taint {
+            category,
+            show_sanitized,
+            inter,
+            depth,
+        } => cmd_taint(root, category.as_deref(), show_sanitized, inter, depth),
+        Commands::DynamicUrls => cmd_dynamic_urls(root),
+        Commands::PathTraversal { depth } => cmd_path_traversal(root, depth),
         Commands::Check {
             config,
             json,
@@ -702,6 +874,7 @@ fn run(command: Commands, root: &Path) -> Result<()> {
             json,
         } => cmd_vulns(root, severity.as_deref(), ecosystem.as_deref(), json),
         Commands::Forget => cmd_forget(root),
+        Commands::Bridges { kind } => cmd_bridges(root, kind.as_deref()),
         Commands::BridgesPromote => cmd_bridges_promote(root),
         Commands::DetectPatterns { pattern, json } => {
             cmd_detect_patterns(root, pattern.as_deref(), json)
@@ -756,5 +929,28 @@ fn run(command: Commands, root: &Path) -> Result<()> {
             }
             Ok(())
         }
+        Commands::GitSummary {
+            commits,
+            author,
+            file,
+        } => cmd_git_summary(root, commits, author.as_deref(), file.as_deref()),
+        Commands::Files { glob } => cmd_list_files(root, glob.as_deref()),
+        Commands::TestContext { file, limit } => {
+            cmd_generate_test_context(root, file.as_deref(), limit)
+        }
+        Commands::Delete => cmd_delete_project(root),
+        Commands::Pipeline { action } => match action {
+            PipelineAction::Plugins => cmd_pipeline_plugins(root),
+            PipelineAction::Deps => cmd_pipeline_deps(root),
+            PipelineAction::Impact { table, depth } => cmd_pipeline_impact(root, &table, depth),
+            PipelineAction::Compliance { scope, plugin_id } => {
+                cmd_pipeline_compliance(root, &scope, &plugin_id)
+            }
+            PipelineAction::Query {
+                plugin_id,
+                field,
+                value,
+            } => cmd_pipeline_query(root, &plugin_id, &field, &value),
+        },
     }
 }

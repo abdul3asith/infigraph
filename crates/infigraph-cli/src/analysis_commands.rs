@@ -557,6 +557,345 @@ pub(crate) fn cmd_forget(root: &Path) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn cmd_bridges(root: &Path, kind: Option<&str>) -> Result<()> {
+    let canonical = root.canonicalize().context("invalid project root")?;
+    let result = infigraph_core::bridges::detect_bridges(&canonical)?;
+
+    let bridges: Vec<_> = match kind {
+        Some(k) => {
+            let k_upper = k.to_uppercase();
+            result
+                .bridges
+                .iter()
+                .filter(|b| b.kind.as_str() == k_upper)
+                .collect()
+        }
+        None => result.bridges.iter().collect(),
+    };
+
+    if bridges.is_empty() {
+        let filter_note = kind.map(|k| format!(" (filter: {k})")).unwrap_or_default();
+        println!("No cross-language bridges detected{}.", filter_note);
+        return Ok(());
+    }
+
+    println!("Cross-language bridges: {} total", result.bridges.len());
+
+    // Group by file
+    let mut by_file: std::collections::HashMap<&str, Vec<_>> = std::collections::HashMap::new();
+    for b in &bridges {
+        by_file.entry(&b.file).or_default().push(b);
+    }
+    let mut files: Vec<&str> = by_file.keys().copied().collect();
+    files.sort_unstable();
+
+    for file in files {
+        let file_bridges = &by_file[file];
+        println!("\n  {}:", file);
+        let mut sorted = file_bridges.to_vec();
+        sorted.sort_by_key(|b| b.line);
+        for b in sorted {
+            let target = b.target_language.as_deref().unwrap_or("unknown");
+            println!(
+                "    L{} [{}] {} -> {} | {}",
+                b.line,
+                b.kind.as_str(),
+                b.foreign_symbol,
+                target,
+                b.detail
+            );
+        }
+    }
+
+    Ok(())
+}
+
+pub(crate) fn cmd_clones(root: &Path, threshold: f64, limit: usize) -> Result<()> {
+    let registry = bundled_registry()?;
+    let mut prism = Infigraph::open(root, registry)?;
+    prism.init()?;
+
+    let store = prism.store().context("graph not initialized")?;
+    let conn = store.connection()?;
+    let gq = infigraph_core::graph::GraphQuery::new(&conn);
+
+    let threshold_f32 = threshold as f32;
+    let kinds = ["Function", "Method"];
+    let kind_filter = kinds
+        .iter()
+        .map(|k| format!("s.kind = '{}'", k))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let query = format!(
+        "MATCH (s:Symbol) WHERE ({kind_filter}) RETURN s.id, s.name, s.kind, s.file, s.docstring"
+    );
+    let rows = gq.raw_query(&query)?;
+
+    if rows.len() < 2 {
+        println!("Not enough symbols to compare. Run 'infigraph index' first.");
+        return Ok(());
+    }
+
+    let embedder = infigraph_core::embed::best_embedder();
+    let emb_path = root.join(".infigraph").join("embeddings.bin");
+
+    let cached: std::collections::HashMap<String, Vec<f32>> = if emb_path.exists() {
+        infigraph_core::embed::load_embeddings_cached(&emb_path)?
+            .into_iter()
+            .collect()
+    } else {
+        std::collections::HashMap::new()
+    };
+
+    let symbol_vecs: Vec<(String, String, String, Vec<f32>)> = rows
+        .iter()
+        .map(|row| {
+            let id = row[0].clone();
+            let text = if row.get(4).is_some_and(|s| !s.is_empty()) {
+                format!("{} {}: {}", row[2], row[1], row[4])
+            } else {
+                format!("{} {}", row[2], row[1])
+            };
+            let emb = cached
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(|| embedder.embed(&text).unwrap_or_default());
+            (id, row[1].clone(), row[3].clone(), emb)
+        })
+        .filter(|(_, _, _, emb)| !emb.is_empty())
+        .collect();
+
+    let n = symbol_vecs.len();
+    let mut pairs: Vec<(f32, usize, usize)> = Vec::new();
+
+    for i in 0..n {
+        for j in (i + 1)..n {
+            if symbol_vecs[i].2 == symbol_vecs[j].2 {
+                continue;
+            }
+            let sim =
+                infigraph_core::embed::cosine_similarity(&symbol_vecs[i].3, &symbol_vecs[j].3);
+            if sim >= threshold_f32 {
+                pairs.push((sim, i, j));
+            }
+        }
+    }
+
+    pairs.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    pairs.truncate(limit);
+
+    if pairs.is_empty() {
+        println!(
+            "No clones found above threshold {:.2} across {} symbols.",
+            threshold, n
+        );
+        return Ok(());
+    }
+
+    // Write SIMILAR_TO edges
+    let write_conn = store.connection()?;
+    for (score, i, j) in &pairs {
+        let id_a = &symbol_vecs[*i].0;
+        let id_b = &symbol_vecs[*j].0;
+        let escape = |s: &str| s.replace('\'', "\\'");
+        let _ = write_conn.query(&format!(
+            "MATCH (a:Symbol), (b:Symbol) WHERE a.id = '{}' AND b.id = '{}' \
+             MERGE (a)-[r:SIMILAR_TO]->(b) SET r.score = {}",
+            escape(id_a),
+            escape(id_b),
+            score
+        ));
+    }
+
+    println!(
+        "Clone detection: {} pairs found (threshold={:.2}, symbols={})\n",
+        pairs.len(),
+        threshold,
+        n
+    );
+
+    for (score, i, j) in &pairs {
+        let (id_a, name_a, file_a, _) = &symbol_vecs[*i];
+        let (id_b, name_b, file_b, _) = &symbol_vecs[*j];
+        println!(
+            "  {:.3}  {} ({}) <-> {} ({})\n         {} vs {}",
+            score, name_a, id_a, name_b, id_b, file_a, file_b
+        );
+    }
+
+    Ok(())
+}
+
+pub(crate) fn cmd_concerns(root: &Path, kind: Option<&str>) -> Result<()> {
+    let registry = bundled_registry()?;
+    let mut prism = Infigraph::open(root, registry)?;
+    prism.init()?;
+
+    let store = prism.store().context("graph not initialized")?;
+    let matches = infigraph_core::concerns::detect_cross_cutting(store)?;
+
+    let filtered: Vec<_> = if let Some(k) = kind {
+        let k_lower = k.to_lowercase();
+        matches
+            .iter()
+            .filter(|m| m.kind.to_lowercase() == k_lower)
+            .cloned()
+            .collect()
+    } else {
+        matches
+    };
+
+    println!("{}", infigraph_core::concerns::format_concerns(&filtered));
+    Ok(())
+}
+
+pub(crate) fn cmd_config_bindings(
+    root: &Path,
+    kind: Option<&str>,
+    profile: Option<&str>,
+) -> Result<()> {
+    let registry = bundled_registry()?;
+    let mut prism = Infigraph::open(root, registry)?;
+    prism.init()?;
+
+    let store = prism.store().context("graph not initialized")?;
+    let bindings = infigraph_core::config::detect_config_bindings(store)?;
+    let canonical = root.canonicalize().context("invalid project root")?;
+    let config_files = infigraph_core::config::detect_config_files(&canonical);
+
+    let filtered: Vec<_> = bindings
+        .iter()
+        .filter(|b| {
+            kind.as_ref()
+                .is_none_or(|k| b.kind.to_lowercase() == k.to_lowercase())
+                && profile
+                    .as_ref()
+                    .is_none_or(|p| b.profile.to_lowercase() == p.to_lowercase())
+        })
+        .cloned()
+        .collect();
+
+    println!(
+        "{}",
+        infigraph_core::config::format_config_bindings(&filtered, &config_files)
+    );
+    Ok(())
+}
+
+pub(crate) fn cmd_reflection(root: &Path, mechanism: Option<&str>) -> Result<()> {
+    let registry = bundled_registry()?;
+    let mut prism = Infigraph::open(root, registry)?;
+    prism.init()?;
+
+    let store = prism.store().context("graph not initialized")?;
+    let canonical = root.canonicalize().context("invalid project root")?;
+    let sites = infigraph_core::reflection::detect_reflection_sites(store, &canonical)?;
+
+    let filtered: Vec<_> = if let Some(m) = mechanism {
+        let m_lower = m.to_lowercase();
+        sites
+            .iter()
+            .filter(|s| s.mechanism.to_lowercase() == m_lower)
+            .cloned()
+            .collect()
+    } else {
+        sites
+    };
+
+    println!(
+        "{}",
+        infigraph_core::reflection::format_reflection_sites(&filtered)
+    );
+    Ok(())
+}
+
+pub(crate) fn cmd_taint(
+    root: &Path,
+    category: Option<&str>,
+    show_sanitized: bool,
+    inter: bool,
+    depth: u32,
+) -> Result<()> {
+    let registry = bundled_registry()?;
+    let mut prism = Infigraph::open(root, registry)?;
+    prism.init()?;
+
+    let store = prism.store().context("graph not initialized")?;
+    let canonical = root.canonicalize().context("invalid project root")?;
+
+    if inter {
+        let flows = infigraph_core::taint::interprocedural::detect_interprocedural_taint(
+            store, &canonical, depth,
+        )?;
+
+        let filtered: Vec<_> = if let Some(c) = category {
+            let c_lower = c.to_lowercase();
+            flows
+                .iter()
+                .filter(|f| f.sink_category.to_lowercase() == c_lower)
+                .cloned()
+                .collect()
+        } else {
+            flows
+        };
+
+        println!(
+            "{}",
+            infigraph_core::taint::interprocedural::format_interprocedural_flows(&filtered)
+        );
+    } else {
+        let flows = infigraph_core::taint::detect_taint_flows(store, &canonical)?;
+
+        let filtered: Vec<_> = flows
+            .iter()
+            .filter(|f| {
+                category
+                    .as_ref()
+                    .is_none_or(|c| f.sink_category.to_lowercase() == c.to_lowercase())
+                    && (show_sanitized || !f.sanitized)
+            })
+            .cloned()
+            .collect();
+
+        println!("{}", infigraph_core::taint::format_taint_flows(&filtered));
+    }
+
+    Ok(())
+}
+
+pub(crate) fn cmd_dynamic_urls(root: &Path) -> Result<()> {
+    let registry = bundled_registry()?;
+    let mut prism = Infigraph::open(root, registry)?;
+    prism.init()?;
+
+    let store = prism.store().context("graph not initialized")?;
+    let canonical = root.canonicalize().context("invalid project root")?;
+    let urls = infigraph_core::taint::dynamic_urls::detect_dynamic_urls(store, &canonical)?;
+
+    println!(
+        "{}",
+        infigraph_core::taint::dynamic_urls::format_dynamic_urls(&urls)
+    );
+    Ok(())
+}
+
+pub(crate) fn cmd_path_traversal(root: &Path, depth: u32) -> Result<()> {
+    let registry = bundled_registry()?;
+    let mut prism = Infigraph::open(root, registry)?;
+    prism.init()?;
+
+    let store = prism.store().context("graph not initialized")?;
+    let canonical = root.canonicalize().context("invalid project root")?;
+    let flows =
+        infigraph_core::taint::path_traversal::detect_path_traversal(store, &canonical, depth)?;
+
+    println!(
+        "{}",
+        infigraph_core::taint::path_traversal::format_path_traversal(&flows)
+    );
+    Ok(())
+}
+
 pub(crate) fn cmd_bridges_promote(root: &Path) -> Result<()> {
     let registry = bundled_registry()?;
     let mut prism = Infigraph::open(root, registry)?;

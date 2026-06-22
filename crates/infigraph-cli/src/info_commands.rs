@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use infigraph_core::Infigraph;
@@ -461,5 +461,183 @@ pub(crate) fn cmd_index_confluence(
         "  Total documents in store: {}\n  Total chunks in store: {}",
         stats.document_count, stats.chunk_count
     );
+    Ok(())
+}
+
+pub(crate) fn cmd_list_files(root: &Path, glob: Option<&str>) -> Result<()> {
+    let registry = bundled_registry()?;
+    let mut prism = Infigraph::open(root, registry)?;
+    prism.init()?;
+
+    let store = prism.store().context("graph not initialized")?;
+    let conn = store.connection()?;
+    let gq = infigraph_core::graph::GraphQuery::new(&conn);
+
+    let rows = gq.raw_query("MATCH (s:Symbol) RETURN DISTINCT s.file ORDER BY s.file")?;
+
+    if rows.is_empty() {
+        println!("No files indexed. Run 'infigraph index' first.");
+        return Ok(());
+    }
+
+    let glob_pat = glob.unwrap_or("");
+    let mut files: Vec<&str> = rows
+        .iter()
+        .filter_map(|row| row.first().map(|s| s.as_str()))
+        .filter(|f| glob_pat.is_empty() || infigraph_mcp::tools::helpers::glob_matches(glob_pat, f))
+        .collect();
+    files.dedup();
+
+    println!("{} source files:", files.len());
+    for f in &files {
+        println!("  {}", f);
+    }
+    Ok(())
+}
+
+pub(crate) fn cmd_generate_test_context(
+    root: &Path,
+    file: Option<&str>,
+    limit: usize,
+) -> Result<()> {
+    let registry = bundled_registry()?;
+    let mut prism = Infigraph::open(root, registry)?;
+    prism.init()?;
+
+    let store = prism.store().context("graph not initialized")?;
+    let conn = store.connection()?;
+    let gq = infigraph_core::graph::GraphQuery::new(&conn);
+
+    let ctx = gq.generate_test_context(file, limit)?;
+
+    println!("Test Generation Context\n");
+    println!("Framework: {}", ctx.framework);
+
+    if let Some(ref ex) = ctx.example_test {
+        println!("\nExample Test (style reference):");
+        println!(
+            "  {} — {}:{}-{}",
+            ex.name, ex.file, ex.start_line, ex.end_line
+        );
+        let file_path = root.join(&ex.file);
+        if let Ok(source) = std::fs::read_to_string(&file_path) {
+            let lines: Vec<&str> = source.lines().collect();
+            let start = (ex.start_line as usize).saturating_sub(1);
+            let end = (ex.end_line as usize).min(lines.len());
+            if start < end {
+                for (i, line) in lines[start..end].iter().enumerate() {
+                    println!("  {:4}  {}", start + i + 1, line);
+                }
+            }
+        }
+    }
+
+    println!(
+        "\nTargets ({} uncovered symbols, priority-ranked):\n",
+        ctx.targets.len()
+    );
+
+    for (i, t) in ctx.targets.iter().enumerate() {
+        println!(
+            "{}. {} [{}] — {}:{}-{} (priority: {})",
+            i + 1,
+            t.name,
+            t.kind,
+            t.file,
+            t.start_line,
+            t.end_line,
+            t.priority_score
+        );
+        if !t.visibility.is_empty() {
+            println!("   visibility: {}", t.visibility);
+        }
+        if !t.parameters.is_empty() {
+            println!("   params: {}", t.parameters);
+        }
+        if !t.return_type.is_empty() {
+            println!("   returns: {}", t.return_type);
+        }
+        if t.complexity > 1 {
+            println!("   complexity: {}", t.complexity);
+        }
+        if !t.callers.is_empty() {
+            println!("   callers: {}", t.callers.join(", "));
+        }
+        if !t.callees.is_empty() {
+            println!("   callees: {}", t.callees.join(", "));
+        }
+        if !t.branches.is_empty() {
+            println!("   branches ({}):", t.branches.len());
+            for b in &t.branches {
+                let indent = "   ".repeat(b.depth as usize + 2);
+                if b.condition.is_empty() {
+                    println!("{}L{}: {}", indent, b.line, b.kind);
+                } else {
+                    println!("{}L{}: {} ({})", indent, b.line, b.kind, b.condition);
+                }
+            }
+        }
+
+        let file_path = root.join(&t.file);
+        if let Ok(source) = std::fs::read_to_string(&file_path) {
+            let lines: Vec<&str> = source.lines().collect();
+            let start = (t.start_line as usize).saturating_sub(1);
+            let end = (t.end_line as usize).min(lines.len());
+            if start < end {
+                for (i, line) in lines[start..end].iter().enumerate() {
+                    println!("   {:4}  {}", start + i + 1, line);
+                }
+            }
+        }
+        println!();
+    }
+
+    Ok(())
+}
+
+pub(crate) fn cmd_delete_project(root: &Path) -> Result<()> {
+    let project_path = PathBuf::from(root);
+
+    // Remove the .infigraph directory within the project
+    let infigraph_dir = project_path.join(".infigraph");
+    if infigraph_dir.exists() {
+        std::fs::remove_dir_all(&infigraph_dir).context("failed to remove .infigraph directory")?;
+    }
+
+    // Unregister from the global registry
+    use infigraph_core::multi::Registry;
+    let mut registry = Registry::load()?;
+    let canonical = project_path.canonicalize().unwrap_or(project_path.clone());
+    let to_remove: Vec<String> = registry
+        .repos
+        .iter()
+        .filter(|(_, entry)| {
+            entry.path == project_path
+                || entry.path == canonical
+                || entry
+                    .path
+                    .canonicalize()
+                    .map(|p| p == canonical)
+                    .unwrap_or(false)
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+
+    for name in &to_remove {
+        registry.repos.remove(name);
+    }
+    registry.save()?;
+
+    if to_remove.is_empty() {
+        println!(
+            "Removed .infigraph directory from {}. (Project was not in the global registry.)",
+            root.display()
+        );
+    } else {
+        println!(
+            "Removed .infigraph directory and unregistered '{}' from global registry.",
+            to_remove.join(", ")
+        );
+    }
     Ok(())
 }

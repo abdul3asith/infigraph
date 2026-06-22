@@ -2188,6 +2188,8 @@ dependencies = [
  "infigraph-docs",
  "infigraph-grammar-plugin",
  "infigraph-languages",
+ "infigraph-mcp",
+ "infigraph-pipeline-plugin",
  "lbug",
  "rayon",
  "serde",

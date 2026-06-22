@@ -115,77 +115,9 @@ esac
 exit 0
 "#;
 
-pub(crate) const INFIGRAPH_ALLOWED_TOOLS: &[&str] = &[
-    "mcp__infigraph__search",
-    "mcp__infigraph__search_code",
-    "mcp__infigraph__search_docs",
-    "mcp__infigraph__search_symbols",
-    "mcp__infigraph__search_sessions",
-    "mcp__infigraph__semantic_search",
-    "mcp__infigraph__get_code_snippet",
-    "mcp__infigraph__get_doc_context",
-    "mcp__infigraph__symbol_context",
-    "mcp__infigraph__trace_callers",
-    "mcp__infigraph__trace_callees",
-    "mcp__infigraph__find_all_references",
-    "mcp__infigraph__transitive_impact",
-    "mcp__infigraph__get_symbols_in_file",
-    "mcp__infigraph__get_file_deps",
-    "mcp__infigraph__get_type_hierarchy",
-    "mcp__infigraph__get_api_surface",
-    "mcp__infigraph__get_dependencies",
-    "mcp__infigraph__detect_dead_code",
-    "mcp__infigraph__detect_changes",
-    "mcp__infigraph__detect_routes",
-    "mcp__infigraph__detect_bridges",
-    "mcp__infigraph__detect_clones",
-    "mcp__infigraph__detect_clusters",
-    "mcp__infigraph__detect_security_issues",
-    "mcp__infigraph__analyze_complexity",
-    "mcp__infigraph__get_complexity",
-    "mcp__infigraph__get_test_coverage",
-    "mcp__infigraph__get_architecture",
-    "mcp__infigraph__get_stats",
-    "mcp__infigraph__get_graph_schema",
-    "mcp__infigraph__get_watch_status",
-    "mcp__infigraph__review",
-    "mcp__infigraph__semantic_diff",
-    "mcp__infigraph__git_summary",
-    "mcp__infigraph__refactor",
-    "mcp__infigraph__index_project",
-    "mcp__infigraph__index_docs",
-    "mcp__infigraph__reindex_docs",
-    "mcp__infigraph__clean_docs",
-    "mcp__infigraph__index_manifests",
-    "mcp__infigraph__index_confluence",
-    "mcp__infigraph__index_confluence_pages",
-    "mcp__infigraph__scip_import",
-    "mcp__infigraph__delete_project",
-    "mcp__infigraph__watch_project",
-    "mcp__infigraph__stop_watch",
-    "mcp__infigraph__watch_docs",
-    "mcp__infigraph__stop_watch_docs",
-    "mcp__infigraph__save_session",
-    "mcp__infigraph__get_latest_session",
-    "mcp__infigraph__purge_sessions",
-    "mcp__infigraph__list_projects",
-    "mcp__infigraph__list_files",
-    "mcp__infigraph__list_languages",
-    "mcp__infigraph__visualize",
-    "mcp__infigraph__visualize_symbol",
-    "mcp__infigraph__generate_sequence_diagram",
-    "mcp__infigraph__export_graph",
-    "mcp__infigraph__query_graph",
-    "mcp__infigraph__group_list",
-    "mcp__infigraph__group_query",
-    "mcp__infigraph__group_contracts",
-    "mcp__infigraph__group_deps",
-    "mcp__infigraph__group_create",
-    "mcp__infigraph__group_add",
-    "mcp__infigraph__group_index",
-    "mcp__infigraph__group_sync",
-    "mcp__infigraph__group_link",
-];
+pub fn allowed_tools() -> Vec<String> {
+    infigraph_mcp::allowed_tools_from_names()
+}
 
 pub(crate) fn install_enforcement_hook(home: &std::path::Path) -> Result<()> {
     let hooks_dir = home.join(".claude").join("hooks");
@@ -478,9 +410,9 @@ pub(crate) fn install_claude_allowlist(home: &std::path::Path) -> Result<()> {
         existing.iter().map(|s| s.as_str()).collect();
     let mut allow_list = existing.clone();
     let mut added = 0usize;
-    for tool in INFIGRAPH_ALLOWED_TOOLS {
-        if !existing_set.contains(*tool) {
-            allow_list.push(tool.to_string());
+    for tool in allowed_tools() {
+        if !existing_set.contains(tool.as_str()) {
+            allow_list.push(tool);
             added += 1;
         }
     }
@@ -531,8 +463,9 @@ pub(crate) fn uninstall_claude_allowlist(home: &std::path::Path) -> Result<()> {
         })
         .unwrap_or_default();
 
+    let infigraph_tools = allowed_tools();
     let infigraph_set: std::collections::HashSet<&str> =
-        INFIGRAPH_ALLOWED_TOOLS.iter().copied().collect();
+        infigraph_tools.iter().map(|s| s.as_str()).collect();
     let filtered: Vec<String> = existing
         .into_iter()
         .filter(|s| !infigraph_set.contains(s.as_str()))

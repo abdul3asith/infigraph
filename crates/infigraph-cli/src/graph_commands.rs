@@ -54,6 +54,50 @@ pub(crate) fn cmd_export(
     Ok(())
 }
 
+pub(crate) fn cmd_callers(root: &Path, symbol: &str) -> Result<()> {
+    let registry = bundled_registry()?;
+    let mut prism = Infigraph::open(root, registry)?;
+    prism.init()?;
+
+    let store = prism.store().context("graph not initialized")?;
+    let conn = store.connection()?;
+    let gq = infigraph_core::graph::GraphQuery::new(&conn);
+
+    let callers = gq.callers_of(symbol)?;
+    if callers.is_empty() {
+        println!("No callers found for '{}'", symbol);
+        return Ok(());
+    }
+
+    println!("Callers of '{}' ({}):", symbol, callers.len());
+    for caller in &callers {
+        println!("  {}", caller);
+    }
+    Ok(())
+}
+
+pub(crate) fn cmd_callees(root: &Path, symbol: &str) -> Result<()> {
+    let registry = bundled_registry()?;
+    let mut prism = Infigraph::open(root, registry)?;
+    prism.init()?;
+
+    let store = prism.store().context("graph not initialized")?;
+    let conn = store.connection()?;
+    let gq = infigraph_core::graph::GraphQuery::new(&conn);
+
+    let callees = gq.callees_of(symbol)?;
+    if callees.is_empty() {
+        println!("No callees found for '{}'", symbol);
+        return Ok(());
+    }
+
+    println!("Callees of '{}' ({}):", symbol, callees.len());
+    for callee in &callees {
+        println!("  {}", callee);
+    }
+    Ok(())
+}
+
 pub(crate) fn cmd_dead_code(root: &Path) -> Result<()> {
     let registry = bundled_registry()?;
     let mut prism = Infigraph::open(root, registry)?;
