@@ -11,7 +11,15 @@ fn main() -> Result<()> {
         .stack_size(32 * 1024 * 1024)
         .build_global();
 
-    // Check for --ui flag
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(run)
+        .expect("failed to spawn MCP worker thread")
+        .join()
+        .expect("MCP worker thread panicked")
+}
+
+fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let ui_enabled = args
         .iter()

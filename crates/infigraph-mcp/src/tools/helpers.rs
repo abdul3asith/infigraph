@@ -26,11 +26,19 @@ pub fn find_infigraph_cli() -> Option<std::path::PathBuf> {
         "infigraph"
     };
 
-    // Check same directory as this binary first
+    // Check same directory as this binary first, then parent (target/debug/deps/ → target/debug/)
     if let Ok(exe) = std::env::current_exe() {
-        let sibling = exe.parent()?.join(bin_name);
-        if sibling.exists() {
-            return Some(sibling);
+        if let Some(dir) = exe.parent() {
+            let sibling = dir.join(bin_name);
+            if sibling.exists() {
+                return Some(sibling);
+            }
+            if let Some(parent) = dir.parent() {
+                let in_parent = parent.join(bin_name);
+                if in_parent.exists() {
+                    return Some(in_parent);
+                }
+            }
         }
     }
     // Fall back to PATH
