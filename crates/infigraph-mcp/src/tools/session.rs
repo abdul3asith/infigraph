@@ -179,7 +179,7 @@ pub fn tool_save_session(args: &Value) -> Result<String> {
 
     let emb_path = sessions_dir.join("embeddings.bin");
     let embed_text =
-        format!("{summary} {pending_tasks} {decisions} {constraints} {assumptions} {narrative}");
+        format!("{session_name} {summary} {pending_tasks} {decisions} {constraints} {assumptions} {narrative}");
     let embedder = embed::code_embedder();
     let vec = embedder.embed(&embed_text)?;
     let mut emb_store = embed::load_embeddings(&emb_path).unwrap_or_default();
@@ -504,7 +504,15 @@ pub fn tool_search_sessions(args: &Value) -> Result<String> {
 
     for (score, session_id) in &scored {
         if let Some(session) = store.load(session_id)? {
-            out.push_str(&format!("### {} (relevance: {:.3})\n\n", session.id, score));
+            let header = if session.name.is_empty() {
+                format!("### {} (relevance: {:.3})\n\n", session.id, score)
+            } else {
+                format!(
+                    "### {} — \"{}\" (relevance: {:.3})\n\n",
+                    session.id, session.name, score
+                )
+            };
+            out.push_str(&header);
             if !session.summary.is_empty() {
                 out.push_str(&format!("**Summary:** {}\n\n", session.summary));
             }

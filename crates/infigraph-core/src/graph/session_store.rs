@@ -67,7 +67,9 @@ impl SessionStore {
             let entry = entry?;
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
-            if name_str.starts_with("session_") && name_str.ends_with(".json") {
+            if (name_str.starts_with("session_") || name_str.starts_with("named_"))
+                && name_str.ends_with(".json")
+            {
                 if let Ok(content) = std::fs::read_to_string(entry.path()) {
                     if let Ok(session) = serde_json::from_str::<SessionData>(&content) {
                         sessions.push(session);
