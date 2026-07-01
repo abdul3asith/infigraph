@@ -71,10 +71,12 @@ impl GrammarPlugin {
             &self.config.language.name,
             lexer_path.to_str().context("Invalid lexer path")?,
             parser_path.to_str().context("Invalid parser path")?,
-            &self.config.language.entry_rule,
-            self.config.language.preprocessor.as_deref(),
-            self.config.language.emit_referenced_form_imports,
-            self.config.language.pipe_strings,
+            &crate::driver::LoadGrammarOptions {
+                entry_rule: &self.config.language.entry_rule,
+                preprocessor: self.config.language.preprocessor.as_deref(),
+                emit_referenced_form_imports: self.config.language.emit_referenced_form_imports,
+                pipe_strings: self.config.language.pipe_strings,
+            },
         )?;
 
         let resolved_extractor =
