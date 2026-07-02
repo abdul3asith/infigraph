@@ -30,8 +30,11 @@ Cargo.lock
 *.sublime-workspace
 .vim/
 
-# Distribution
-npm/
+# Distribution — npm/ package source is committed; only its build output is ignored.
+npm/bin/
+npm/platforms/*/bin/
+npm/*.tgz
+npm/platforms/*/*.tgz
 
 # Runtime
 .infigraph/

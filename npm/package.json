@@ -1,0 +1,34 @@
+{
+  "name": "@anthropic/infigraph",
+  "version": "1.6.0",
+  "description": "Code intelligence graph — AST parsing, semantic search, knowledge graph, MCP server",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/intuit/infigraph"
+  },
+  "homepage": "https://github.com/intuit/infigraph",
+  "bin": {
+    "infigraph": "bin/infigraph.js",
+    "infigraph-mcp": "bin/infigraph-mcp.js"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "optionalDependencies": {
+    "@anthropic/infigraph-darwin-arm64": "1.6.0",
+    "@anthropic/infigraph-darwin-x64": "1.6.0",
+    "@anthropic/infigraph-linux-x64": "1.6.0",
+    "@anthropic/infigraph-win32-x64": "1.6.0"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "files": [
+    "bin/infigraph.js",
+    "bin/infigraph-mcp.js",
+    "install.js",
+    "migrate.js",
+    "README.md"
+  ]
+}

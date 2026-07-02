@@ -1,0 +1,13 @@
+{
+  "name": "@anthropic/infigraph-win32-x64",
+  "version": "1.6.0",
+  "description": "Infigraph platform binaries for Windows x64",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/intuit/infigraph"
+  },
+  "os": ["win32"],
+  "cpu": ["x64"],
+  "files": ["bin/"]
+}
