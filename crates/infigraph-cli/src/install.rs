@@ -87,6 +87,8 @@ pub(crate) fn cmd_install() -> Result<()> {
     // Install hooks and Claude Code allowlist
     crate::hooks::install_enforcement_hook(&home)?;
     crate::hooks::install_session_save_hook(&home)?;
+    crate::hooks::install_clear_suggest_hook(&home)?;
+    crate::hooks::install_session_end_hook(&home)?;
     crate::hooks::install_claude_allowlist(&home)?;
 
     // Copy model files to ~/.infigraph/models/
@@ -120,6 +122,14 @@ Infigraph MCP is indexed. Use Infigraph tools FIRST for all code tasks. Fall bac
 - **Onboarding:** `index_project` → `get_architecture` → `get_stats`
 - **Multi-repo:** `group_create` → `group_add` × N → `group_index` → `group_sync` → `group_link`
 
+### Subagents — infigraph-indexed projects
+Do NOT spawn these agent types for code tasks — they lack MCP access and will fall back to grep/glob:
+- **Explore** → use `search`, `search_code`, `search_symbols` directly instead
+- **Plan** → use `get_architecture`, `get_skeleton`, `get_stats` directly instead
+- **code-reviewer** → use `get_doc_context`, `get_code_snippet`, `review` directly instead
+
+For tasks requiring a subagent, use **general-purpose** — it has full MCP/infigraph access.
+
 ### Verbose tools — delegate to subagent
 `get_architecture`, `transitive_impact`, `detect_dead_code`, `detect_clusters`, `detect_clones`, `export_graph`, `query_graph`, `trace_callers`/`trace_callees` (deep), `group_query`, `group_index`
 
@@ -138,6 +148,7 @@ Infigraph MCP is indexed. Use Infigraph tools FIRST for all code tasks. Fall bac
   5. **Periodic** — if you have NOT called `save_session` in the last 5 exchanges with the user, call it NOW regardless of whether anything dramatic happened. This is a hard rule, not a suggestion.
 - Do NOT defer saves ("I'll save later"). Do NOT batch them. Do NOT wait for user to ask.
 - "Later" does not exist — context compaction or session end can happen at any moment.
+- **Before `/clear`:** ALWAYS call `save_session` first — `/clear` wipes context and LM2 can only restore what was persisted. Unsaved reasoning, decisions, and in-flight work will be lost.
 - Same-day saves merge: summary/pending_tasks overwrite, decisions append, files_touched union
 - **Narrative dumps:** On every `save_session`, include `narrative` field with full session story — what was explored, found, reasoned, decided, and why. Chronological prose, not terse bullets. Written to `.infigraph/sessions/session_YYYY-MM-DD.md` and embedded for semantic search. On session start, if `get_latest_session` shows a narrative log path, read it when structured fields aren't enough context.
 
@@ -675,6 +686,17 @@ pub(crate) fn print_update_hint(handle: Option<std::thread::JoinHandle<()>>) {
     }
 }
 
+fn reinstall_hooks() -> Result<()> {
+    let home = dirs::home_dir().context("cannot find home directory")?;
+    println!("\nReinstalling hooks...");
+    crate::hooks::install_enforcement_hook(&home)?;
+    crate::hooks::install_session_save_hook(&home)?;
+    crate::hooks::install_clear_suggest_hook(&home)?;
+    crate::hooks::install_session_end_hook(&home)?;
+    crate::hooks::install_claude_allowlist(&home)?;
+    Ok(())
+}
+
 pub(crate) fn cmd_update() -> Result<()> {
     let current = env!("CARGO_PKG_VERSION");
 
@@ -683,7 +705,10 @@ pub(crate) fn cmd_update() -> Result<()> {
         if version_newer(&latest, current) {
             println!("Updating infigraph: v{current} → v{latest}");
             match self_update(&latest) {
-                Ok(()) => return Ok(()),
+                Ok(()) => {
+                    reinstall_hooks()?;
+                    return Ok(());
+                }
                 Err(e) => {
                     eprintln!("Binary update failed ({e}), falling back to install script...");
                 }

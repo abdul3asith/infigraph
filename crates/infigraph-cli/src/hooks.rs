@@ -30,6 +30,20 @@ case "$tool" in
       echo "WARNING: Prefer mcp__infigraph__list_files over find. Infigraph is indexed for this project." >&2
     fi
     ;;
+  Agent)
+    agent_type=$(echo "$input" | jq -r '.tool_input.subagent_type // empty')
+    case "$agent_type" in
+      Explore)
+        echo "WARNING: Do NOT use Explore agent — it lacks MCP access. Use infigraph search/search_code/search_symbols directly, or use general-purpose agent." >&2
+        ;;
+      Plan)
+        echo "WARNING: Do NOT use Plan agent — it lacks MCP access. Use infigraph get_architecture/get_skeleton directly, or use general-purpose agent." >&2
+        ;;
+      code-reviewer)
+        echo "WARNING: Do NOT use code-reviewer agent — it lacks MCP access. Use infigraph get_doc_context/review directly, or use general-purpose agent." >&2
+        ;;
+    esac
+    ;;
 esac
 
 exit 0
@@ -110,7 +124,111 @@ ENDJSON
 {"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"INFIGRAPH SESSION RESTORE: Call mcp__infigraph__get_latest_session to recover prior session context (decisions, constraints, blockers, pending tasks). Do NOT start work without checking prior session state."}}
 ENDJSON
     ;;
+  clear)
+    backup=$(ls -t "$cwd"/.infigraph/sessions/unsaved-transcript-*.md 2>/dev/null | head -1)
+    if [ -n "$backup" ]; then
+      cat <<ENDJSON
+{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"INFIGRAPH CONTEXT RESET: Context was cleared. A pre-clear transcript backup exists at $backup. Read this file (contains last ~5 exchanges as clean markdown), extract key context (summary, decisions, pending tasks, files touched), then call mcp__infigraph__save_session to persist it. After saving, delete the backup file with Bash rm. Then call mcp__infigraph__get_latest_session to reload. Do NOT proceed with user work until this recovery is complete."}}
+ENDJSON
+    else
+      cat <<'ENDJSON'
+{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"INFIGRAPH CONTEXT RESET: Context was cleared. Call mcp__infigraph__get_latest_session to restore prior session state, then call mcp__infigraph__memory_context with the user's next query to inject relevant code and session context. Do NOT proceed without restoring context. NOTE: If session was NOT saved before /clear, some recent context may be lost — remind user to save_session before clearing next time."}}
+ENDJSON
+    fi
+    ;;
 esac
+
+exit 0
+"#;
+
+pub(crate) const SESSION_END_SAVE_HOOK_SCRIPT: &str = r##"#!/usr/bin/env bash
+# SessionEnd hook — extract last ~5 exchanges from transcript for recovery.
+# Next SessionStart will detect this and prompt model to summarize + save_session.
+
+input=$(cat)
+reason=$(echo "$input" | jq -r '.reason // empty')
+transcript_path=$(echo "$input" | jq -r '.transcript_path // empty')
+cwd=$(echo "$input" | jq -r '.cwd // empty')
+
+# Only act for infigraph-indexed projects with a valid transcript
+[ -d "$cwd/.infigraph" ] || exit 0
+[ -f "$transcript_path" ] || exit 0
+
+# Skip if save_session was called recently (counter reset to 0 means save just happened)
+session_id=$(echo "$input" | jq -r '.session_id // empty')
+if [ -n "$session_id" ]; then
+  counter_file="${TMPDIR:-/tmp}/infigraph-sessions/$session_id.count"
+  if [ -f "$counter_file" ]; then
+    count=$(cat "$counter_file" 2>/dev/null || echo 0)
+    [ "$count" -eq 0 ] && exit 0
+  fi
+fi
+
+sessions_dir="$cwd/.infigraph/sessions"
+mkdir -p "$sessions_dir"
+
+backup="$sessions_dir/unsaved-transcript-${reason:-unknown}.md"
+
+python3 -c "
+import json, sys
+
+messages = []
+with open('$transcript_path') as f:
+    for line in f:
+        try:
+            d = json.loads(line)
+        except:
+            continue
+        if d.get('type') not in ('user', 'assistant'):
+            continue
+        role = d['type']
+        msg = d.get('message', {})
+        if role == 'user':
+            content = msg.get('content', '')
+            if isinstance(content, list):
+                content = ' '.join(p.get('text','') for p in content if p.get('type')=='text')
+            if content.strip():
+                messages.append(('user', content.strip()))
+        elif role == 'assistant':
+            content = msg.get('content', '')
+            if isinstance(content, list):
+                parts = [p.get('text','') for p in content if p.get('type')=='text']
+                content = ' '.join(parts)
+            if content.strip():
+                messages.append(('assistant', content.strip()))
+
+recent = messages[-10:]
+with open('$backup', 'w') as out:
+    out.write('# Unsaved session context (last ~5 exchanges)\n\n')
+    for role, text in recent:
+        out.write(f'## {role.title()}\n{text}\n\n')
+" 2>/dev/null
+
+exit 0
+"##;
+
+pub(crate) const CLEAR_SUGGEST_HOOK_SCRIPT: &str = r#"#!/usr/bin/env bash
+# Infigraph UserPromptSubmit hook — suggest /clear every 5 turns to keep context lean.
+# Uses own counter file per session. Resets on session start (new session_id).
+
+input=$(cat)
+session_id=$(echo "$input" | jq -r '.session_id // empty')
+[ -z "$session_id" ] && exit 0
+
+counter_dir="${TMPDIR:-/tmp}/claude-clear-suggest"
+mkdir -p "$counter_dir" 2>/dev/null
+counter_file="$counter_dir/$session_id.count"
+
+count=0
+[ -f "$counter_file" ] && count=$(cat "$counter_file" 2>/dev/null || echo 0)
+count=$((count + 1))
+echo "$count" > "$counter_file"
+
+if [ $((count % 5)) -eq 0 ]; then
+  cat <<'ENDJSON'
+{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"CONTEXT CLEANUP: 5 turns since last reminder. Suggest running /clear to keep context lean. Ask user yes/no — only proceed if confirmed. ALWAYS call save_session before clearing."}}
+ENDJSON
+fi
 
 exit 0
 "#;
@@ -145,7 +263,7 @@ pub(crate) fn install_enforcement_hook(home: &std::path::Path) -> Result<()> {
     }
 
     let hook_entry = json!({
-        "matcher": "Grep|Glob|Bash",
+        "matcher": "Grep|Glob|Bash|Agent",
         "hooks": [{
             "type": "command",
             "command": hook_path.to_string_lossy(),
@@ -183,10 +301,44 @@ pub(crate) fn install_enforcement_hook(home: &std::path::Path) -> Result<()> {
         std::fs::write(&settings_path, pretty)?;
         println!("  Added PreToolUse hook to {}", settings_path.display());
     } else {
-        println!(
-            "  PreToolUse hook already configured in {}",
-            settings_path.display()
-        );
+        let expected_matcher = "Grep|Glob|Bash|Agent";
+        let mut arr = pre_tool;
+        let mut updated = false;
+        for entry in arr.iter_mut() {
+            let is_infigraph = entry
+                .get("hooks")
+                .and_then(|h| h.as_array())
+                .map(|hooks| {
+                    hooks.iter().any(|h| {
+                        h.get("command")
+                            .and_then(|c| c.as_str())
+                            .map(|c| c.contains("infigraph-enforce"))
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false);
+            if is_infigraph {
+                let current_matcher = entry.get("matcher").and_then(|m| m.as_str()).unwrap_or("");
+                if current_matcher != expected_matcher {
+                    entry["matcher"] = json!(expected_matcher);
+                    updated = true;
+                }
+            }
+        }
+        if updated {
+            settings["hooks"]["PreToolUse"] = serde_json::Value::Array(arr);
+            let pretty = serde_json::to_string_pretty(&settings)?;
+            std::fs::write(&settings_path, pretty)?;
+            println!(
+                "  Updated PreToolUse matcher in {}",
+                settings_path.display()
+            );
+        } else {
+            println!(
+                "  PreToolUse hook already configured in {}",
+                settings_path.display()
+            );
+        }
     }
 
     Ok(())
@@ -384,6 +536,145 @@ pub(crate) fn install_session_save_hook(home: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn install_clear_suggest_hook(home: &std::path::Path) -> Result<()> {
+    let hooks_dir = home.join(".claude").join("hooks");
+    std::fs::create_dir_all(&hooks_dir)?;
+
+    let hook_path = hooks_dir.join("infigraph-clear-suggest.sh");
+    std::fs::write(&hook_path, CLEAR_SUGGEST_HOOK_SCRIPT)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook_path, std::fs::Permissions::from_mode(0o755))?;
+    }
+    println!("  Installed clear suggest hook: {}", hook_path.display());
+
+    let settings_path = home.join(".claude").join("settings.json");
+    let mut settings: serde_json::Value = if settings_path.is_file() {
+        let content = std::fs::read_to_string(&settings_path)?;
+        serde_json::from_str(&content)?
+    } else {
+        json!({})
+    };
+
+    if settings.get("hooks").is_none() {
+        settings["hooks"] = json!({});
+    }
+
+    let hook_entry = json!({
+        "hooks": [{
+            "type": "command",
+            "command": hook_path.to_string_lossy(),
+            "timeout": 5
+        }]
+    });
+
+    let user_prompt = settings["hooks"]
+        .get("UserPromptSubmit")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let already_exists = user_prompt.iter().any(|entry| {
+        entry
+            .get("hooks")
+            .and_then(|h| h.as_array())
+            .map(|hooks| {
+                hooks.iter().any(|h| {
+                    h.get("command")
+                        .and_then(|c| c.as_str())
+                        .map(|c| c.contains("infigraph-clear-suggest"))
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false)
+    });
+
+    if !already_exists {
+        let mut arr = user_prompt;
+        arr.push(hook_entry);
+        settings["hooks"]["UserPromptSubmit"] = serde_json::Value::Array(arr);
+        let pretty = serde_json::to_string_pretty(&settings)?;
+        std::fs::write(&settings_path, pretty)?;
+        println!(
+            "  Added UserPromptSubmit clear-suggest hook to {}",
+            settings_path.display()
+        );
+    } else {
+        println!("  UserPromptSubmit clear-suggest hook already configured");
+    }
+
+    Ok(())
+}
+
+pub(crate) fn install_session_end_hook(home: &std::path::Path) -> Result<()> {
+    let hooks_dir = home.join(".claude").join("hooks");
+    std::fs::create_dir_all(&hooks_dir)?;
+
+    let hook_path = hooks_dir.join("infigraph-session-end-save.sh");
+    std::fs::write(&hook_path, SESSION_END_SAVE_HOOK_SCRIPT)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook_path, std::fs::Permissions::from_mode(0o755))?;
+    }
+    println!("  Installed session-end save hook: {}", hook_path.display());
+
+    let settings_path = home.join(".claude").join("settings.json");
+    let mut settings: serde_json::Value = if settings_path.is_file() {
+        let content = std::fs::read_to_string(&settings_path)?;
+        serde_json::from_str(&content)?
+    } else {
+        json!({})
+    };
+
+    if settings.get("hooks").is_none() {
+        settings["hooks"] = json!({});
+    }
+
+    let hook_entry = json!({
+        "hooks": [{
+            "type": "command",
+            "command": hook_path.to_string_lossy(),
+            "timeout": 10
+        }]
+    });
+
+    let session_end = settings["hooks"]
+        .get("SessionEnd")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let already_exists = session_end.iter().any(|entry| {
+        entry
+            .get("hooks")
+            .and_then(|h| h.as_array())
+            .map(|hooks| {
+                hooks.iter().any(|h| {
+                    h.get("command")
+                        .and_then(|c| c.as_str())
+                        .map(|c| c.contains("infigraph-session-end"))
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false)
+    });
+
+    if !already_exists {
+        let mut arr = session_end;
+        arr.push(hook_entry);
+        settings["hooks"]["SessionEnd"] = serde_json::Value::Array(arr);
+        let pretty = serde_json::to_string_pretty(&settings)?;
+        std::fs::write(&settings_path, pretty)?;
+        println!("  Added SessionEnd hook to {}", settings_path.display());
+    } else {
+        println!("  SessionEnd session-end hook already configured");
+    }
+
+    Ok(())
+}
+
 pub(crate) fn install_claude_allowlist(home: &std::path::Path) -> Result<()> {
     let settings_path = home.join(".claude").join("settings.local.json");
     let mut settings: serde_json::Value = if settings_path.is_file() {
@@ -501,6 +792,8 @@ pub(crate) fn uninstall_hooks(home: &std::path::Path) -> Result<()> {
         "infigraph-session-save.sh",
         "infigraph-session-reset.sh",
         "infigraph-session-start.sh",
+        "infigraph-clear-suggest.sh",
+        "infigraph-session-end-save.sh",
     ] {
         let hook_path = hooks_dir.join(hook_file);
         if hook_path.exists() {
@@ -532,6 +825,7 @@ pub(crate) fn uninstall_hooks(home: &std::path::Path) -> Result<()> {
                 "UserPromptSubmit",
                 "PostToolUse",
                 "SessionStart",
+                "SessionEnd",
             ] {
                 if let Some(arr) = settings["hooks"]
                     .get_mut(*event)
