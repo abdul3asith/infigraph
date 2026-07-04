@@ -318,11 +318,11 @@ fn main() -> Result<()> {
             (
                 "generate_test_context",
                 Box::new(|| {
-                    kq.generate_test_context(None, 10)?;
+                    kq.generate_test_context(None, 10, None)?;
                     Ok(())
                 }),
                 Box::new(|| {
-                    cozo.generate_test_context(None, 10)?;
+                    cozo.generate_test_context(None, 10, None)?;
                     Ok(())
                 }),
             ),

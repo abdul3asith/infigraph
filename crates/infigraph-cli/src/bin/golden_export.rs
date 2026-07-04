@@ -177,7 +177,7 @@ fn main() -> Result<()> {
 
     // 13. generate_test_context (limit 10, no file filter)
     {
-        let mut ctx = q.generate_test_context(None, 10)?;
+        let mut ctx = q.generate_test_context(None, 10, None)?;
         ctx.targets.sort_by(|a, b| a.symbol_id.cmp(&b.symbol_id));
         for t in &mut ctx.targets {
             t.callers.sort();

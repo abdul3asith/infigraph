@@ -569,7 +569,7 @@ pub(crate) fn cmd_generate_test_context(
     let conn = store.connection()?;
     let gq = infigraph_core::graph::GraphQuery::new(&conn);
 
-    let ctx = gq.generate_test_context(file, limit)?;
+    let ctx = gq.generate_test_context(file, limit, None)?;
 
     println!("Test Generation Context\n");
     println!("Framework: {}", ctx.framework);
