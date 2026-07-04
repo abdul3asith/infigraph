@@ -1,11 +1,11 @@
-# @anthropic/infigraph
+# @intuit/infigraph
 
 npm wrapper for [infigraph](https://github.com/intuit/infigraph) — code intelligence graph with AST parsing, semantic search, knowledge graph, and MCP server.
 
 ## Install
 
 ```bash
-npm install -g @anthropic/infigraph
+npm install -g @intuit/infigraph
 ```
 
 This downloads the pre-built native binary for your platform.
@@ -22,17 +22,11 @@ infigraph-mcp
 
 ## MCP Configuration
 
-Add to your Claude Desktop or Claude Code config:
+MCP registration happens automatically on install via `infigraph install`. To re-run manually:
 
-```json
-{
-  "mcpServers": {
-    "infigraph": {
-      "command": "npx",
-      "args": ["@anthropic/infigraph-mcp"]
-    }
-  }
-}
+```bash
+infigraph install    # register
+infigraph uninstall  # unregister
 ```
 
 ## Corporate Network
@@ -40,7 +34,7 @@ Add to your Claude Desktop or Claude Code config:
 If behind a corporate firewall, set `INFIGRAPH_MIRROR` to your internal artifact mirror:
 
 ```bash
-INFIGRAPH_MIRROR=https://artifact.example.com/infigraph npm install -g @anthropic/infigraph
+INFIGRAPH_MIRROR=https://artifact.example.com/infigraph npm install -g @intuit/infigraph
 ```
 
 ## Migration from Terragraph

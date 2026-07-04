@@ -1,5 +1,5 @@
 {
-  "name": "@anthropic/infigraph",
+  "name": "@intuit/infigraph",
   "version": "1.6.0",
   "description": "Code intelligence graph — AST parsing, semantic search, knowledge graph, MCP server",
   "license": "Apache-2.0",
@@ -16,10 +16,10 @@
     "postinstall": "node install.js"
   },
   "optionalDependencies": {
-    "@anthropic/infigraph-darwin-arm64": "1.6.0",
-    "@anthropic/infigraph-darwin-x64": "1.6.0",
-    "@anthropic/infigraph-linux-x64": "1.6.0",
-    "@anthropic/infigraph-win32-x64": "1.6.0"
+    "@intuit/infigraph-darwin-arm64": "1.6.0",
+    "@intuit/infigraph-darwin-x64": "1.6.0",
+    "@intuit/infigraph-linux-x64": "1.6.0",
+    "@intuit/infigraph-win32-x64": "1.6.0"
   },
   "engines": {
     "node": ">=16"

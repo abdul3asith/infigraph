@@ -161,7 +161,7 @@ jobs:
           npm version "$VERSION" --no-git-tag-version --allow-same-version
           # Update optionalDependencies versions
           for platform in darwin-arm64 darwin-x64 linux-x64 win32-x64; do
-            sed -i "s|\"@anthropic/infigraph-${platform}\": \".*\"|\"@anthropic/infigraph-${platform}\": \"${VERSION}\"|" package.json
+            sed -i "s|\"@intuit/infigraph-${platform}\": \".*\"|\"@intuit/infigraph-${platform}\": \"${VERSION}\"|" package.json
           done
           # Update platform package.json versions
           for platform in darwin-arm64 darwin-x64 linux-x64 win32-x64; do

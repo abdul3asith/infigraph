@@ -1,5 +1,5 @@
 {
-  "name": "@anthropic/infigraph-darwin-arm64",
+  "name": "@intuit/infigraph-darwin-arm64",
   "version": "1.6.0",
   "description": "Infigraph platform binaries for macOS Apple Silicon",
   "license": "Apache-2.0",

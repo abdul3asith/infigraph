@@ -9,10 +9,10 @@ const { execSync } = require("child_process");
 const VERSION = require("./package.json").version;
 
 const PLATFORM_PACKAGES = {
-  "darwin-arm64": "@anthropic/infigraph-darwin-arm64",
-  "darwin-x64": "@anthropic/infigraph-darwin-x64",
-  "linux-x64": "@anthropic/infigraph-linux-x64",
-  "win32-x64": "@anthropic/infigraph-win32-x64",
+  "darwin-arm64": "@intuit/infigraph-darwin-arm64",
+  "darwin-x64": "@intuit/infigraph-darwin-x64",
+  "linux-x64": "@intuit/infigraph-linux-x64",
+  "win32-x64": "@intuit/infigraph-win32-x64",
 };
 
 const PLATFORM_TARGETS = {
@@ -37,6 +37,7 @@ if (fs.existsSync(infigraphBin)) {
     });
     if (out.includes(VERSION)) {
       console.log(`[infigraph] v${VERSION} already installed`);
+      registerMcp();
       runMigration();
       process.exit(0);
     }
@@ -54,6 +55,7 @@ if (platformPkg) {
       copyDirSync(srcBin, binDir);
       setPermissions();
       if (verifyInstall()) {
+        registerMcp();
         runMigration();
         process.exit(0);
       }
@@ -116,6 +118,7 @@ try {
 setPermissions();
 verifyInstall();
 cleanup(tmpDir);
+registerMcp();
 runMigration();
 
 // --- Helpers ---
@@ -145,6 +148,14 @@ function cleanup(dir) {
   try {
     fs.rmSync(dir, { recursive: true, force: true });
   } catch (_) {}
+}
+
+function registerMcp() {
+  try {
+    execSync(`"${infigraphBin}" install`, { stdio: "inherit", timeout: 15000 });
+  } catch (e) {
+    console.error(`[infigraph] MCP registration failed: ${e.message}`);
+  }
 }
 
 function runMigration() {

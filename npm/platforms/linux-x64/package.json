@@ -1,5 +1,5 @@
 {
-  "name": "@anthropic/infigraph-linux-x64",
+  "name": "@intuit/infigraph-linux-x64",
   "version": "1.6.0",
   "description": "Infigraph platform binaries for Linux x64",
   "license": "Apache-2.0",
