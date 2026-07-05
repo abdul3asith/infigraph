@@ -29,6 +29,14 @@ jobs:
         os: [macos-latest, ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
+      - name: Free disk space (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/share/swift /usr/local/share/powershell /usr/local/share/chromium \
+            /usr/local/lib/node_modules /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force || true
+          df -h
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -39,7 +47,5 @@ jobs:
           cache-on-failure: true
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
-      - name: Build CLI
-        run: cargo build -p infigraph-cli
       - name: Test
         run: cargo test --all
