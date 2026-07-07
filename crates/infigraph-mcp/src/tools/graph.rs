@@ -8,10 +8,10 @@ use infigraph_core::graph::SessionStore;
 use infigraph_core::multi::Registry;
 use infigraph_languages::bundled_registry;
 
-use super::helpers::{glob_matches, open_prism};
+use super::helpers::{glob_matches, open_prism_read_only};
 
 pub fn tool_query_graph(args: &Value) -> Result<String> {
-    let prism = open_prism(args)?;
+    let prism = open_prism_read_only(args)?;
     let cypher = args
         .get("cypher")
         .and_then(|c| c.as_str())
@@ -34,7 +34,7 @@ pub fn tool_query_graph(args: &Value) -> Result<String> {
 }
 
 pub fn tool_get_symbols_in_file(args: &Value) -> Result<String> {
-    let prism = open_prism(args)?;
+    let prism = open_prism_read_only(args)?;
     let file = args
         .get("file")
         .and_then(|f| f.as_str())
@@ -59,13 +59,13 @@ pub fn tool_get_symbols_in_file(args: &Value) -> Result<String> {
 }
 
 pub fn tool_get_stats(args: &Value) -> Result<String> {
-    let prism = open_prism(args)?;
+    let prism = open_prism_read_only(args)?;
     let stats = prism.stats()?;
     Ok(format!("{}", stats))
 }
 
 pub fn tool_get_code_snippet(args: &Value) -> Result<String> {
-    let prism = open_prism(args)?;
+    let prism = open_prism_read_only(args)?;
     let symbol_id = args
         .get("symbol_id")
         .and_then(|s| s.as_str())
@@ -180,7 +180,7 @@ pub fn tool_list_languages(_args: &Value) -> Result<String> {
 }
 
 pub fn tool_get_graph_schema(args: &Value) -> Result<String> {
-    let prism = open_prism(args)?;
+    let prism = open_prism_read_only(args)?;
     let stats = prism.stats()?;
     let store = prism.store().context("not initialized")?;
     let conn = store.connection()?;
@@ -225,7 +225,7 @@ pub fn tool_get_graph_schema(args: &Value) -> Result<String> {
 }
 
 pub fn tool_symbol_context(args: &Value) -> Result<String> {
-    let prism = open_prism(args)?;
+    let prism = open_prism_read_only(args)?;
     let symbol_id = args
         .get("symbol_id")
         .and_then(|s| s.as_str())
@@ -300,7 +300,7 @@ pub fn tool_symbol_context(args: &Value) -> Result<String> {
 }
 
 pub fn tool_detect_routes(args: &Value) -> Result<String> {
-    let prism = open_prism(args)?;
+    let prism = open_prism_read_only(args)?;
     let store = prism.store().context("not initialized")?;
     let conn = store.connection()?;
     let gq = infigraph_core::graph::GraphQuery::new(&conn);
@@ -310,7 +310,7 @@ pub fn tool_detect_routes(args: &Value) -> Result<String> {
 }
 
 pub fn tool_find_all_references(args: &Value) -> Result<String> {
-    let prism = open_prism(args)?;
+    let prism = open_prism_read_only(args)?;
     let store = prism.store().context("not initialized")?;
     let conn = store.connection()?;
     let gq = infigraph_core::graph::GraphQuery::new(&conn);
@@ -333,7 +333,7 @@ pub fn tool_find_all_references(args: &Value) -> Result<String> {
 }
 
 pub fn tool_get_api_surface(args: &Value) -> Result<String> {
-    let prism = open_prism(args)?;
+    let prism = open_prism_read_only(args)?;
     let store = prism.store().context("not initialized")?;
     let conn = store.connection()?;
     let gq = infigraph_core::graph::GraphQuery::new(&conn);
@@ -379,7 +379,7 @@ pub fn tool_get_api_surface(args: &Value) -> Result<String> {
 }
 
 pub fn tool_get_file_deps(args: &Value) -> Result<String> {
-    let prism = open_prism(args)?;
+    let prism = open_prism_read_only(args)?;
     let store = prism.store().context("not initialized")?;
     let conn = store.connection()?;
     let gq = infigraph_core::graph::GraphQuery::new(&conn);
@@ -412,7 +412,7 @@ pub fn tool_get_file_deps(args: &Value) -> Result<String> {
 }
 
 pub fn tool_get_type_hierarchy(args: &Value) -> Result<String> {
-    let prism = open_prism(args)?;
+    let prism = open_prism_read_only(args)?;
     let store = prism.store().context("not initialized")?;
     let conn = store.connection()?;
     let gq = infigraph_core::graph::GraphQuery::new(&conn);
@@ -446,7 +446,7 @@ pub fn tool_get_type_hierarchy(args: &Value) -> Result<String> {
 }
 
 pub fn tool_get_test_coverage(args: &Value) -> Result<String> {
-    let prism = open_prism(args)?;
+    let prism = open_prism_read_only(args)?;
     let store = prism.store().context("not initialized")?;
     let conn = store.connection()?;
     let gq = infigraph_core::graph::GraphQuery::new(&conn);
@@ -495,7 +495,7 @@ pub fn tool_get_test_coverage(args: &Value) -> Result<String> {
 }
 
 pub fn tool_get_complexity(args: &Value) -> Result<String> {
-    let prism = open_prism(args)?;
+    let prism = open_prism_read_only(args)?;
     let store = prism.store().context("not initialized")?;
     let conn = store.connection()?;
     let gq = infigraph_core::graph::GraphQuery::new(&conn);
@@ -572,7 +572,7 @@ pub fn tool_get_complexity(args: &Value) -> Result<String> {
 }
 
 pub fn tool_get_skeleton(args: &Value) -> Result<String> {
-    let prism = open_prism(args)?;
+    let prism = open_prism_read_only(args)?;
     let store = prism.store().context("not initialized")?;
     let conn = store.connection()?;
     let gq = infigraph_core::graph::GraphQuery::new(&conn);
@@ -586,7 +586,7 @@ pub fn tool_get_skeleton(args: &Value) -> Result<String> {
 }
 
 pub fn tool_get_doc_context(args: &Value) -> Result<String> {
-    let prism = open_prism(args)?;
+    let prism = open_prism_read_only(args)?;
     let symbol_id = args
         .get("symbol_id")
         .and_then(|s| s.as_str())
@@ -761,7 +761,7 @@ fn auto_inject_session_context(path: &str, symbol_name: &str, main_output: &mut 
 }
 
 pub fn tool_list_files(args: &Value) -> Result<String> {
-    let prism = open_prism(args)?;
+    let prism = open_prism_read_only(args)?;
     let store = prism.store().context("not initialized")?;
     let conn = store.connection()?;
     let gq = infigraph_core::graph::GraphQuery::new(&conn);
@@ -784,7 +784,7 @@ pub fn tool_list_files(args: &Value) -> Result<String> {
 }
 
 pub fn tool_generate_test_context(args: &Value) -> Result<String> {
-    let prism = open_prism(args)?;
+    let prism = open_prism_read_only(args)?;
     let store = prism.store().context("not initialized")?;
     let conn = store.connection()?;
     let gq = infigraph_core::graph::GraphQuery::new(&conn);
@@ -901,7 +901,7 @@ pub fn tool_generate_test_context(args: &Value) -> Result<String> {
 }
 
 pub fn tool_generate_sequence_diagram(args: &Value) -> Result<String> {
-    let prism = open_prism(args)?;
+    let prism = open_prism_read_only(args)?;
     let symbol_id = args
         .get("symbol_id")
         .and_then(|v| v.as_str())

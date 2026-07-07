@@ -10,7 +10,7 @@ use infigraph_core::embed;
 use infigraph_core::search::BM25Index;
 
 use super::docs::{open_doc_index, tool_search_docs};
-use super::helpers::{find_containing_symbol, open_prism};
+use super::helpers::find_containing_symbol;
 
 struct SearchContext {
     db_path: PathBuf,
@@ -72,7 +72,7 @@ fn get_or_build_search_ctx(args: &Value) -> Result<CachedSearchData> {
         }
     }
 
-    let prism = open_prism(args)?;
+    let prism = super::helpers::open_prism_read_only(args)?;
     let store = prism.store().context("not initialized")?;
     let conn = store.connection()?;
     let gq = infigraph_core::graph::GraphQuery::new(&conn);

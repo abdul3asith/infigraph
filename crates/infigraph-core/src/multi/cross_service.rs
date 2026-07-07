@@ -40,6 +40,8 @@ pub fn detect_cross_service_deps(
     // Also index wildcard prefixes: /v1/entities/schedules → /v1/entities/*
     // so dynamic URLs like f"/v1/entities/{x}" match after normalization.
     let mut route_lookup: HashMap<String, (String, String)> = HashMap::new();
+    // Wildcard prefixes collect ALL methods so we can pick the right one at match time.
+    let mut wildcard_methods: HashMap<String, (String, Vec<String>)> = HashMap::new();
     for contract in &group.contracts {
         if contract.kind == ContractKind::HttpRoute {
             let normalized = normalize_route_path(&contract.path);
@@ -55,24 +57,56 @@ pub fn detect_cross_service_deps(
                 if segments.len() >= 4 {
                     let prefix = segments[..segments.len() - 1].join("/") + "/*";
                     if prefix.len() >= 4 {
-                        route_lookup
+                        wildcard_methods
                             .entry(prefix)
-                            .or_insert_with(|| (contract.service.clone(), contract.method.clone()));
+                            .and_modify(|(_, methods)| {
+                                if !methods.contains(&contract.method) {
+                                    methods.push(contract.method.clone());
+                                }
+                            })
+                            .or_insert_with(|| {
+                                (contract.service.clone(), vec![contract.method.clone()])
+                            });
                     }
                 }
             }
         }
     }
 
-    // Helper closure: exact match first, then wildcard fallback (path + "/*").
-    let lookup_route = |normalized: &str| -> Option<&(String, String)> {
-        if let Some(hit) = route_lookup.get(normalized) {
-            return Some(hit);
-        }
-        // Fallback: consumer calls /v1/customers, producer has /v1/customers/*
-        let wildcard = format!("{}/*", normalized);
-        route_lookup.get(&wildcard)
-    };
+    // Resolve a wildcard match to a (service, method) pair.
+    // If consumer_method is known and the producer has it, use it.
+    // Otherwise pick GET (wildcard = base path = collection endpoint).
+    // Fall back to first available method.
+    let resolve_wildcard =
+        |prefix: &str, consumer_method: Option<&str>| -> Option<(String, String)> {
+            let (svc, methods) = wildcard_methods.get(prefix)?;
+            let method = if let Some(cm) = consumer_method {
+                let cm_upper = cm.to_ascii_uppercase();
+                if methods.iter().any(|m| m.eq_ignore_ascii_case(&cm_upper)) {
+                    cm_upper
+                } else if methods.iter().any(|m| m.eq_ignore_ascii_case("GET")) {
+                    "GET".to_string()
+                } else {
+                    methods[0].clone()
+                }
+            } else if methods.iter().any(|m| m.eq_ignore_ascii_case("GET")) {
+                "GET".to_string()
+            } else {
+                methods[0].clone()
+            };
+            Some((svc.clone(), method))
+        };
+
+    // Resolve a route: exact match first, then wildcard fallback.
+    // consumer_method is used to pick the right method from wildcard matches.
+    let resolve_route =
+        |normalized: &str, consumer_method: Option<&str>| -> Option<(String, String)> {
+            if let Some((svc, method)) = route_lookup.get(normalized) {
+                return Some((svc.clone(), method.clone()));
+            }
+            let wildcard = format!("{}/*", normalized);
+            resolve_wildcard(&wildcard, consumer_method)
+        };
 
     let mut deps = Vec::new();
 
@@ -110,14 +144,14 @@ pub fn detect_cross_service_deps(
             let urls = extract_api_paths(doc);
             for url in urls {
                 let normalized = normalize_route_path(&url);
-                if let Some((target_svc, target_method)) = lookup_route(&normalized) {
-                    if target_svc != repo_name {
+                if let Some((target_svc, target_method)) = resolve_route(&normalized, None) {
+                    if target_svc != *repo_name {
                         deps.push(CrossServiceDep {
                             caller_service: repo_name.clone(),
                             caller_file: row[2].clone(),
                             caller_symbol: row[0].clone(),
-                            target_service: target_svc.clone(),
-                            target_method: target_method.clone(),
+                            target_service: target_svc,
+                            target_method,
                             target_path: url.clone(),
                             url_found: url,
                         });
@@ -130,10 +164,10 @@ pub fn detect_cross_service_deps(
         let source_urls = scan_source_for_urls(&entry.path);
         for (file, symbol_hint, url, consumer_method) in source_urls {
             let normalized = normalize_route_path(&url);
-            if let Some((target_svc, target_method)) = lookup_route(&normalized) {
-                if target_svc != repo_name {
-                    let effective_method =
-                        consumer_method.as_deref().unwrap_or(target_method.as_str());
+            if let Some((target_svc, target_method)) =
+                resolve_route(&normalized, consumer_method.as_deref())
+            {
+                if target_svc != *repo_name {
                     // Try to resolve line hint to enclosing symbol ID
                     let caller_id = if let Some(stripped) = symbol_hint.strip_prefix("line:") {
                         let line_num: i32 = stripped.parse().unwrap_or(0);
@@ -154,8 +188,8 @@ pub fn detect_cross_service_deps(
                         caller_service: repo_name.clone(),
                         caller_file: file,
                         caller_symbol: caller_id,
-                        target_service: target_svc.clone(),
-                        target_method: effective_method.to_string(),
+                        target_service: target_svc,
+                        target_method,
                         target_path: url.clone(),
                         url_found: url,
                     });
@@ -166,7 +200,8 @@ pub fn detect_cross_service_deps(
         // Contract-driven inverted scan: check source for any known contract path
         let mut seen_contract_hits: std::collections::HashSet<(String, String)> =
             std::collections::HashSet::new();
-        let contract_hits = scan_source_for_contracts(&entry.path, &route_lookup, repo_name);
+        let contract_hits =
+            scan_source_for_contracts(&entry.path, &route_lookup, &wildcard_methods, repo_name);
         for (file, line_hint, matched_path, target_svc, target_method) in contract_hits {
             let key = (file.clone(), matched_path.clone());
             if !seen_contract_hits.insert(key) {
@@ -402,6 +437,7 @@ fn extract_api_paths(text: &str) -> Vec<String> {
 
 /// Extract the HTTP method from a source line containing a URL reference.
 /// Recognises patterns like `requests.get(`, `http.delete(`, `.post(`, `method="PUT"`, etc.
+/// Also infers GET from `fetch`/`_fetch_*` calls when no explicit mutating method is present.
 fn extract_http_method_from_line(line: &str) -> Option<String> {
     let lower = line.to_ascii_lowercase();
     for method in &["get", "post", "put", "delete", "patch"] {
@@ -577,6 +613,7 @@ fn extract_constant_name(line: &str, _path: &str) -> Option<String> {
 fn scan_source_for_contracts(
     root: &Path,
     route_lookup: &HashMap<String, (String, String)>,
+    wildcard_methods: &HashMap<String, (String, Vec<String>)>,
     caller_repo: &str,
 ) -> Vec<(String, String, String, String, String)> {
     if route_lookup.is_empty() {
@@ -598,6 +635,7 @@ fn scan_source_for_contracts(
         root,
         SKIP_DIRS,
         route_lookup,
+        wildcard_methods,
         caller_repo,
         &mut results,
     );
@@ -609,6 +647,7 @@ fn walk_for_contracts(
     dir: &Path,
     skip: &[&str],
     route_lookup: &HashMap<String, (String, String)>,
+    wildcard_methods: &HashMap<String, (String, Vec<String>)>,
     caller_repo: &str,
     results: &mut Vec<(String, String, String, String, String)>,
 ) {
@@ -623,7 +662,15 @@ fn walk_for_contracts(
 
         if path.is_dir() {
             if !skip.contains(&name_str.as_ref()) && !name_str.starts_with('.') {
-                walk_for_contracts(base, &path, skip, route_lookup, caller_repo, results);
+                walk_for_contracts(
+                    base,
+                    &path,
+                    skip,
+                    route_lookup,
+                    wildcard_methods,
+                    caller_repo,
+                    results,
+                );
             }
         } else if path.is_file() {
             let rel = path
@@ -649,13 +696,39 @@ fn walk_for_contracts(
                             && stripped.starts_with('/')
                         {
                             let normalized = normalize_route_path(stripped);
-                            let hit = route_lookup
-                                .get(&normalized)
-                                .or_else(|| route_lookup.get(&format!("{}/*", normalized)));
+                            let consumer_method = extract_http_method_from_line(line);
+                            // Exact match first
+                            let hit = if let Some((svc, method)) = route_lookup.get(&normalized) {
+                                Some((svc.clone(), method.clone()))
+                            } else {
+                                // Wildcard fallback with proper method resolution
+                                let wc = format!("{}/*", normalized);
+                                wildcard_methods.get(&wc).map(|(svc, methods)| {
+                                    let method = if let Some(ref cm) = consumer_method {
+                                        let cm_upper = cm.to_ascii_uppercase();
+                                        if methods.iter().any(|m| m.eq_ignore_ascii_case(&cm_upper))
+                                        {
+                                            cm_upper
+                                        } else if methods
+                                            .iter()
+                                            .any(|m| m.eq_ignore_ascii_case("GET"))
+                                        {
+                                            "GET".to_string()
+                                        } else {
+                                            methods[0].clone()
+                                        }
+                                    } else if methods.iter().any(|m| m.eq_ignore_ascii_case("GET"))
+                                    {
+                                        "GET".to_string()
+                                    } else {
+                                        methods[0].clone()
+                                    };
+                                    (svc.clone(), method)
+                                })
+                            };
                             if let Some((target_svc, target_method)) = hit {
                                 if target_svc != caller_repo {
-                                    let effective_method = extract_http_method_from_line(line)
-                                        .unwrap_or_else(|| target_method.clone());
+                                    let effective_method = consumer_method.unwrap_or(target_method);
                                     results.push((
                                         rel.clone(),
                                         format!("line:{}", line_num + 1),
@@ -932,7 +1005,8 @@ VERSION = "v1.2.3"
             "/health/ready".to_string(),
             ("svc-a".to_string(), "GET".to_string()),
         );
-        let results = scan_source_for_contracts(dir.path(), &route_lookup, "svc-b");
+        let wc = HashMap::new();
+        let results = scan_source_for_contracts(dir.path(), &route_lookup, &wc, "svc-b");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].3, "svc-a");
     }
@@ -942,7 +1016,8 @@ VERSION = "v1.2.3"
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::write(dir.path().join("c.py"), "x = \"/health/ready\"").unwrap();
         let route_lookup = HashMap::new();
-        let results = scan_source_for_contracts(dir.path(), &route_lookup, "svc-b");
+        let wc = HashMap::new();
+        let results = scan_source_for_contracts(dir.path(), &route_lookup, &wc, "svc-b");
         assert!(results.is_empty());
     }
 
@@ -955,7 +1030,8 @@ VERSION = "v1.2.3"
             "/health/ready".to_string(),
             ("svc-a".to_string(), "GET".to_string()),
         );
-        let results = scan_source_for_contracts(dir.path(), &route_lookup, "svc-a");
+        let wc = HashMap::new();
+        let results = scan_source_for_contracts(dir.path(), &route_lookup, &wc, "svc-a");
         assert!(results.is_empty(), "should not match own service");
     }
 
@@ -1077,7 +1153,8 @@ VERSION = "v1.2.3"
             "/health/ready".to_string(),
             ("svc-a".to_string(), "GET".to_string()),
         );
-        let results = scan_source_for_contracts(dir.path(), &route_lookup, "svc-b");
+        let wc = HashMap::new();
+        let results = scan_source_for_contracts(dir.path(), &route_lookup, &wc, "svc-b");
         assert!(results.is_empty(), "should skip test files");
     }
 

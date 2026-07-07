@@ -5,7 +5,7 @@ use std::sync::{mpsc, Mutex};
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-use super::helpers::{find_infigraph_cli, open_prism};
+use super::helpers::{find_infigraph_cli, open_prism, open_prism_read_only};
 
 // ---------------------------------------------------------------------------
 // Document indexing helpers and statics
@@ -76,7 +76,7 @@ pub fn auto_start_doc_watch(path: &str) -> Option<String> {
 }
 
 pub fn tool_review(args: &Value) -> Result<String> {
-    let prism = open_prism(args)?;
+    let prism = open_prism_read_only(args)?;
     let base_ref = args
         .get("base_ref")
         .and_then(|v| v.as_str())

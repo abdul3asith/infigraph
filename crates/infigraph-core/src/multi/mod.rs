@@ -502,6 +502,11 @@ pub fn index_group(
         let result = prism.index()?;
         results.push((repo_name.clone(), result.indexed_files, result.total_files));
 
+        // Index manifests so Dependency nodes exist for SharedPackage detection
+        if let Some(store) = prism.store() {
+            let _ = crate::manifest::index_manifests(prism.root(), store);
+        }
+
         registry.register_repo(repo_name, &entry.path, &prism)?;
     }
 

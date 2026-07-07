@@ -7,7 +7,7 @@ use serde_json::Value;
 use infigraph_core::embed;
 use infigraph_core::graph::SessionStore;
 
-use super::helpers::open_prism;
+use super::helpers::open_prism_read_only;
 
 #[derive(Clone)]
 struct ScoredItem {
@@ -200,7 +200,7 @@ fn gather_code(
     limit: usize,
     mut depth: Depth,
 ) -> Result<Vec<ScoredItem>> {
-    let prism = open_prism(args)?;
+    let prism = open_prism_read_only(args)?;
     let path = args.get("path").and_then(|p| p.as_str()).unwrap_or(".");
     let store = prism
         .store()
@@ -694,7 +694,7 @@ fn gather_sessions(path: &str, query: &str) -> Result<(Vec<ScoredItem>, Vec<Scor
 }
 
 fn gather_skeleton(args: &Value, file: &str) -> Result<Option<ScoredItem>> {
-    let prism = open_prism(args)?;
+    let prism = open_prism_read_only(args)?;
     let store = prism.store().context("not indexed")?;
     let conn = store.connection()?;
     let gq = infigraph_core::graph::GraphQuery::new(&conn);
@@ -714,7 +714,7 @@ fn gather_skeleton(args: &Value, file: &str) -> Result<Option<ScoredItem>> {
 }
 
 fn apply_anchor_boost(items: &mut [ScoredItem], args: &Value, anchor_file: &str) -> Result<()> {
-    let prism = open_prism(args)?;
+    let prism = open_prism_read_only(args)?;
     let store = match prism.store() {
         Some(s) => s,
         None => return Ok(()),

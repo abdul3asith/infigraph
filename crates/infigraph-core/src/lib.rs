@@ -75,6 +75,14 @@ impl Infigraph {
         Ok(())
     }
 
+    /// Initialize the graph store in read-only mode.
+    /// Safe for concurrent access while a watcher writes.
+    pub fn init_read_only(&mut self) -> Result<()> {
+        let store = GraphStore::open_read_only(&self.db_path)?;
+        self.store = Some(store);
+        Ok(())
+    }
+
     /// Index all supported files in the project, building the graph.
     /// Skips files whose content hash matches the stored hash (incremental).
     pub fn index(&self) -> Result<IndexResult> {

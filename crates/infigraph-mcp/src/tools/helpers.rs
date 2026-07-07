@@ -69,6 +69,18 @@ pub fn open_prism(args: &Value) -> Result<Infigraph> {
     Ok(prism)
 }
 
+pub fn open_prism_read_only(args: &Value) -> Result<Infigraph> {
+    let raw_path = args
+        .get("path")
+        .and_then(|p| p.as_str())
+        .context("missing 'path' argument")?;
+    let path = resolve_project_path(raw_path);
+    let registry = bundled_registry()?;
+    let mut prism = Infigraph::open(&PathBuf::from(&path), registry)?;
+    prism.init_read_only()?;
+    Ok(prism)
+}
+
 pub fn find_infigraph_cli() -> Option<std::path::PathBuf> {
     let bin_name = if cfg!(windows) {
         "infigraph.exe"
