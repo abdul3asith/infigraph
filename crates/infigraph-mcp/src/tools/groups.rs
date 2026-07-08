@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-use infigraph_core::multi::{self, Registry};
+use infigraph_core::multi::{self, combined, Registry};
 use infigraph_core::Infigraph;
 use infigraph_languages::bundled_registry;
 
@@ -258,4 +258,102 @@ pub fn tool_group_link(args: &Value) -> Result<String> {
         "Linked {} cross-service CALLS_SERVICE edges in group '{}'.",
         count, group_name
     ))
+}
+
+pub fn tool_group_search(args: &Value) -> Result<String> {
+    let group_name = args
+        .get("group_name")
+        .and_then(|g| g.as_str())
+        .context("missing 'group_name' argument")?;
+    let query = args
+        .get("query")
+        .and_then(|q| q.as_str())
+        .context("missing 'query' argument")?;
+    let limit = args.get("limit").and_then(|l| l.as_u64()).unwrap_or(20) as usize;
+    let alpha = args.get("alpha").and_then(|a| a.as_f64()).unwrap_or(0.3) as f32;
+    let deep = args.get("deep").and_then(|d| d.as_bool()).unwrap_or(false);
+
+    if deep {
+        return combined::combined_search_deep(group_name, query, limit, alpha);
+    }
+
+    let results = combined::combined_search(group_name, query, limit, alpha)?;
+
+    if results.is_empty() {
+        return Ok(format!(
+            "No results for '{}' in group '{}'",
+            query, group_name
+        ));
+    }
+
+    let mut out = format!(
+        "Results for '{}' in group '{}' ({} hits, alpha={:.1}):\n",
+        query,
+        group_name,
+        results.len(),
+        alpha
+    );
+    for r in &results {
+        let repo = combined::extract_repo(&r.symbol_id);
+        out.push_str(&format!(
+            "  {:.3} (bm25:{:.2} vec:{:.2})  [{}]  {}\n",
+            r.score, r.bm25_score, r.vector_score, repo, r.symbol_id
+        ));
+    }
+    Ok(out)
+}
+
+pub fn tool_group_build(args: &Value) -> Result<String> {
+    let group_name = args
+        .get("group_name")
+        .and_then(|g| g.as_str())
+        .context("missing 'group_name' argument")?;
+    let full = args.get("full").and_then(|f| f.as_bool()).unwrap_or(false);
+
+    let mut out = String::new();
+
+    // Step 1: Index
+    let mut registry = Registry::load()?;
+    let results = infigraph_core::multi::index_group(
+        &mut registry,
+        group_name,
+        full,
+        infigraph_languages::bundled_registry,
+    )?;
+    out.push_str(&format!("Step 1/4 — Indexed {} repos:\n", results.len()));
+    for (repo, indexed, total) in &results {
+        out.push_str(&format!("  {}: {}/{} files\n", repo, indexed, total));
+    }
+
+    // Step 2: Sync contracts
+    let contract_count = multi::sync_group_contracts(&mut registry, group_name, bundled_registry)?;
+    out.push_str(&format!("Step 2/4 — {} contracts synced\n", contract_count));
+
+    // Step 3: Link cross-service calls
+    let edge_count = multi::link_cross_service_calls(&registry, group_name, bundled_registry)?;
+    out.push_str(&format!(
+        "Step 3/4 — {} CALLS_SERVICE edges linked\n",
+        edge_count
+    ));
+
+    // Step 4: Build combined graph
+    let (symbols, edges) = combined::build_combined_graph(&registry, group_name)?;
+    out.push_str(&format!(
+        "Step 4/4 — Combined graph: {} symbols, {} edges\n",
+        symbols, edges
+    ));
+
+    // Start watchers + CLAUDE.md
+    if let Some(group) = registry.groups.get(group_name) {
+        for repo_name in &group.repos {
+            if let Some(entry) = registry.repos.get(repo_name) {
+                let p = entry.path.to_string_lossy();
+                auto_start_watch(&p);
+                let _ = infigraph_core::claude_md::ensure_project_claude_md(&entry.path);
+            }
+        }
+    }
+
+    out.push_str("\nReady. Use group_search to query across all repos.");
+    Ok(out)
 }

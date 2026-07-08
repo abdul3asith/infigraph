@@ -701,6 +701,28 @@ pub(crate) enum GroupAction {
         #[arg(long)]
         combined: bool,
     },
+    /// Full rebuild: index → sync → link → combined (all steps in one command)
+    Build {
+        group: String,
+        /// Force full reindex (wipe .infigraph/ per repo)
+        #[arg(long)]
+        full: bool,
+    },
+    /// Hybrid BM25+vector search across the combined graph
+    Search {
+        group: String,
+        /// Search query
+        query: String,
+        /// Max results
+        #[arg(short, long, default_value = "20")]
+        limit: usize,
+        /// BM25/vector blend (0.0 = pure BM25, 1.0 = pure vector)
+        #[arg(short, long, default_value = "0.3")]
+        alpha: f32,
+        /// Deep mode: enrich results with cross-repo graph context for LLM reasoning
+        #[arg(long)]
+        deep: bool,
+    },
     /// Watch all repos in a group for changes, auto-reindex and rebuild combined graph
     Watch {
         group: String,

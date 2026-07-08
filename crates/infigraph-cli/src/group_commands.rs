@@ -103,6 +103,9 @@ pub(crate) fn cmd_group(root: &Path, action: GroupAction) -> Result<()> {
                 let mut prism = Infigraph::open(&entry.path, reg)?;
                 prism.init()?;
                 let result = prism.index()?;
+                if let Some(store) = prism.store() {
+                    let _ = infigraph_core::manifest::index_manifests(&entry.path, store);
+                }
                 println!(
                     "  Indexed {}/{} files",
                     result.indexed_files, result.total_files
@@ -231,6 +234,118 @@ pub(crate) fn cmd_group(root: &Path, action: GroupAction) -> Result<()> {
                     println!("--- {} ---", repo);
                     for row in rows {
                         println!("  {}", row.join(" | "));
+                    }
+                }
+            }
+        }
+        GroupAction::Build { group, full } => {
+            let g = registry
+                .groups
+                .get(&group)
+                .context(format!("group '{}' not found", group))?
+                .clone();
+
+            // Step 1: Index
+            println!("=== Step 1/4: Indexing {} repos ===", g.repos.len());
+            for repo_name in &g.repos {
+                let entry = registry
+                    .repos
+                    .get(repo_name)
+                    .context(format!("repo '{}' not in registry", repo_name))?
+                    .clone();
+                println!("  {} ({})", repo_name, entry.path.display());
+                if full {
+                    let tg_dir = entry.path.join(".infigraph");
+                    if tg_dir.exists() {
+                        let sess_dir = tg_dir.join("sessions");
+                        let sess_bak = entry.path.join(".infigraph-sessions-backup");
+                        let had = sess_dir.exists();
+                        if had {
+                            let _ = std::fs::rename(&sess_dir, &sess_bak);
+                        }
+                        std::fs::remove_dir_all(&tg_dir)?;
+                        if had {
+                            std::fs::create_dir_all(&tg_dir)?;
+                            let _ = std::fs::rename(&sess_bak, &sess_dir);
+                        }
+                    }
+                }
+                let reg = bundled_registry()?;
+                let mut prism = Infigraph::open(&entry.path, reg)?;
+                prism.init()?;
+                let result = prism.index()?;
+                if let Some(store) = prism.store() {
+                    let _ = infigraph_core::manifest::index_manifests(&entry.path, store);
+                }
+                println!(
+                    "    Indexed {}/{} files",
+                    result.indexed_files, result.total_files
+                );
+                registry.register_repo(repo_name, &entry.path, &prism)?;
+            }
+
+            // Step 2: Sync contracts
+            println!("=== Step 2/4: Syncing contracts ===");
+            let contract_count = infigraph_core::multi::sync_group_contracts(
+                &mut registry,
+                &group,
+                bundled_registry,
+            )?;
+            registry.save()?;
+            println!("  {} contracts", contract_count);
+
+            // Step 3: Link cross-service calls
+            println!("=== Step 3/4: Linking cross-service calls ===");
+            let edge_count = infigraph_core::multi::link_cross_service_calls(
+                &registry,
+                &group,
+                bundled_registry,
+            )?;
+            println!("  {} CALLS_SERVICE edges", edge_count);
+
+            // Step 4: Build combined graph
+            println!("=== Step 4/4: Building combined graph ===");
+            let (symbols, edges) =
+                infigraph_core::multi::combined::build_combined_graph(&registry, &group)?;
+            println!(
+                "Done. {} symbols, {} edges. Ready for 'group search {} <query>'.",
+                symbols, edges, group
+            );
+        }
+        GroupAction::Search {
+            group,
+            query,
+            limit,
+            alpha,
+            deep,
+        } => {
+            if deep {
+                let output = infigraph_core::multi::combined::combined_search_deep(
+                    &group, &query, limit, alpha,
+                )?;
+                print!("{}", output);
+            } else {
+                let results =
+                    infigraph_core::multi::combined::combined_search(&group, &query, limit, alpha)?;
+                if results.is_empty() {
+                    println!("No results for '{}' in group '{}'", query, group);
+                } else {
+                    println!(
+                        "Results for '{}' in group '{}' (alpha={:.1}):",
+                        query, group, alpha
+                    );
+                    for r in &results {
+                        let repo = infigraph_core::multi::combined::extract_repo(&r.symbol_id);
+                        println!(
+                            "  {:.3} (bm25:{:.2} vec:{:.2})  [{}]  {}",
+                            r.score, r.bm25_score, r.vector_score, repo, r.symbol_id
+                        );
+                        if let Some(doc) = &r.docstring {
+                            if !doc.is_empty() {
+                                let preview: String = doc.chars().take(80).collect();
+                                println!("         {}", preview);
+                            }
+                        }
                     }
                 }
             }
