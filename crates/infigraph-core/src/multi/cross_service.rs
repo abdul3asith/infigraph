@@ -234,12 +234,15 @@ pub fn detect_cross_service_deps(
         }
     }
 
-    // Dedup: keep first occurrence per (caller_service, caller_file, target_path)
+    // Dedup: keep first occurrence per (caller_service, caller_symbol, target_path).
+    // caller_symbol is in the key so the class-level def-site edge AND the method-level
+    // reference-site edge (from credit_constant_references) both survive — a route can
+    // legitimately be reached from both the aggregating class and each calling method.
     let mut seen: HashSet<(String, String, String)> = HashSet::new();
     deps.retain(|d| {
         seen.insert((
             d.caller_service.clone(),
-            d.caller_file.clone(),
+            d.caller_symbol.clone(),
             d.target_path.clone(),
         ))
     });
@@ -348,11 +351,120 @@ pub fn link_cross_service_calls(
         }
     }
 
+    // SharedPackage linking: for each SharedPackage contract, find import symbols
+    // in consumer repos that reference the published package name
+    let group = registry
+        .groups
+        .get(group_name)
+        .context(format!("group '{}' not found", group_name))?;
+    for contract in &group.contracts {
+        if contract.kind != ContractKind::SharedPackage {
+            continue;
+        }
+        let pkg_name = &contract.path;
+        let publisher = &contract.service;
+        // Convert dotted package name to module path for import matching
+        // e.g. "ies-core.ascendskills.ascendskills" → search for "ascendskills"
+        let pkg_parts: Vec<&str> = pkg_name.split('.').collect();
+        let search_terms: Vec<&str> = pkg_parts.iter().filter(|p| p.len() > 3).copied().collect();
+        if search_terms.is_empty() {
+            continue;
+        }
+
+        for repo_name in &group.repos {
+            if repo_name == publisher {
+                continue;
+            }
+            let entry = match registry.repos.get(repo_name) {
+                Some(e) => e,
+                None => continue,
+            };
+            let lang_registry = build_registry()?;
+            let mut prism = Infigraph::open(&entry.path, lang_registry)?;
+            prism.init()?;
+            let store = match prism.store() {
+                Some(s) => s,
+                None => continue,
+            };
+            let _lock = match store.write_lock() {
+                Ok(l) => l,
+                Err(_) => continue,
+            };
+            let conn = match store.connection() {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let gq = GraphQuery::new(&conn);
+
+            // Scan source files for import statements matching the package
+            let import_hits =
+                scan_source_for_package_imports(&entry.path, &search_terms, repo_name);
+            for (file, line_num, _import_text) in &import_hits {
+                let escaped_file = file.replace('\'', "\\'");
+                let q = format!(
+                    "MATCH (s:Symbol) WHERE s.file = '{}' AND s.start_line <= {} AND s.end_line >= {} \
+                     RETURN s.id ORDER BY (s.end_line - s.start_line) ASC LIMIT 1",
+                    escaped_file, line_num, line_num
+                );
+                let caller_sym = gq
+                    .raw_query(&q)
+                    .ok()
+                    .and_then(|rows| rows.into_iter().next())
+                    .and_then(|row| row.into_iter().next())
+                    .or_else(|| {
+                        // Fallback: find any symbol in the same file (module-level import)
+                        let fallback_q = format!(
+                            "MATCH (s:Symbol) WHERE s.file = '{}' RETURN s.id ORDER BY s.start_line ASC LIMIT 1",
+                            escaped_file
+                        );
+                        gq.raw_query(&fallback_q)
+                            .ok()
+                            .and_then(|rows| rows.into_iter().next())
+                            .and_then(|row| row.into_iter().next())
+                    })
+                    .unwrap_or_else(|| format!("{}:{}", file, line_num));
+                let caller_sym = caller_sym.replace('\'', "\\'");
+
+                let target_id = format!("xsvc::{}::package::{}", publisher, pkg_name);
+                let target_name =
+                    format!("{} package {}", publisher, pkg_name).replace('\'', "\\'");
+
+                let create_target = format!(
+                    "MERGE (t:Symbol {{id: '{}'}}) \
+                     ON CREATE SET t.name = '{}', t.kind = 'ExternalService', \
+                     t.file = '(external)', t.start_line = 0, t.end_line = 0, \
+                     t.signature_hash = '', t.language = 'external', t.visibility = 'public', \
+                     t.parent = '', t.docstring = 'Shared package: {}', t.complexity = 0",
+                    target_id, target_name, pkg_name,
+                );
+                let _ = gq.raw_query(&create_target);
+
+                let check_edge = format!(
+                    "MATCH (a:Symbol {{id: '{}'}})-[:CALLS_SERVICE]->(b:Symbol {{id: '{}'}}) RETURN a.id",
+                    caller_sym, target_id,
+                );
+                let existing = gq.raw_query(&check_edge).unwrap_or_default();
+                if !existing.is_empty() {
+                    continue;
+                }
+
+                let create_edge = format!(
+                    "MATCH (a:Symbol {{id: '{}'}}), (b:Symbol {{id: '{}'}}) \
+                     CREATE (a)-[:CALLS_SERVICE {{method: 'package', path: '{}', target_service: '{}'}}]->(b)",
+                    caller_sym, target_id, pkg_name, publisher,
+                );
+                if gq.raw_query(&create_edge).is_ok() {
+                    total += 1;
+                }
+            }
+        }
+    }
+
     Ok(total)
 }
 
 /// Normalize a route path for matching: strip trailing slash, remove param placeholders.
-fn normalize_route_path(path: &str) -> String {
+pub fn normalize_route_path(path: &str) -> String {
     let path = path.trim_end_matches('/');
     // Extract just the path portion from full URLs
     let path = if let Some(idx) = path.find("/api/") {
@@ -491,8 +603,12 @@ fn is_test_or_doc_file(rel_path: &str) -> bool {
 }
 
 /// Scan source files for URL strings matching route patterns.
-/// Also resolves named constants (e.g., `DOC_UPLOAD_PATH = "/v1/..."`) and
-/// credits the definition line when the constant is referenced elsewhere.
+/// Also resolves named constants (e.g., `DOC_UPLOAD_PATH = "/v1/..."`): the raw
+/// literal appears only at the class/module-level definition line, so the enclosing
+/// symbol resolves to the class. A second pass credits each *reference* to the constant
+/// (e.g. `self.ESTIMATES_PATH` inside a method) so the CALLS_SERVICE edge also lands on
+/// the calling method, not just the class. Same-file only (imported constants are a
+/// follow-up).
 /// Returns (file, line_hint, url, consumer_http_method).
 fn scan_source_for_urls(root: &Path) -> Vec<(String, String, String, Option<String>)> {
     const SKIP_DIRS: &[&str] = &[
@@ -508,7 +624,119 @@ fn scan_source_for_urls(root: &Path) -> Vec<(String, String, String, Option<Stri
     let mut results = Vec::new();
     let mut url_constants: HashMap<String, Vec<(String, usize, String)>> = HashMap::new();
     walk_for_urls(root, root, SKIP_DIRS, &mut results, &mut url_constants);
+    credit_constant_references(root, SKIP_DIRS, &url_constants, &mut results);
     results
+}
+
+/// For each recorded URL constant, scan its defining file for *references* to the
+/// constant name (`FOO_PATH`, `self.FOO_PATH`) and emit a result at each reference line
+/// so edges attach to the referencing symbol (usually a method), not just the def line.
+/// Skips the definition line itself. Same-file references only.
+fn credit_constant_references(
+    root: &Path,
+    skip: &[&str],
+    url_constants: &HashMap<String, Vec<(String, usize, String)>>,
+    results: &mut Vec<(String, String, String, Option<String>)>,
+) {
+    if url_constants.is_empty() {
+        return;
+    }
+    // Group constants by defining file: file -> Vec<(const_name, def_line, url)>
+    let mut by_file: HashMap<String, Vec<(String, usize, String)>> = HashMap::new();
+    for (name, defs) in url_constants {
+        for (file, def_line, url) in defs {
+            by_file
+                .entry(file.clone())
+                .or_default()
+                .push((name.clone(), *def_line, url.clone()));
+        }
+    }
+    walk_for_constant_refs(root, root, skip, &by_file, results);
+}
+
+fn walk_for_constant_refs(
+    base: &Path,
+    dir: &Path,
+    skip: &[&str],
+    by_file: &HashMap<String, Vec<(String, usize, String)>>,
+    results: &mut Vec<(String, String, String, Option<String>)>,
+) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+
+        if path.is_dir() {
+            if !skip.contains(&name_str.as_ref()) && !name_str.starts_with('.') {
+                walk_for_constant_refs(base, &path, skip, by_file, results);
+            }
+        } else if path.is_file() {
+            let rel = path
+                .strip_prefix(base)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let consts = match by_file.get(rel.as_str()) {
+                Some(c) => c,
+                None => continue,
+            };
+            if is_test_or_doc_file(&rel) {
+                continue;
+            }
+            let content = match std::fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            for (line_num, line) in content.lines().enumerate() {
+                let line_no = line_num + 1;
+                for (const_name, def_line, url) in consts {
+                    // Skip the definition line itself (already emitted by walk_for_urls).
+                    if line_no == *def_line {
+                        continue;
+                    }
+                    if line_contains_identifier(line, const_name) {
+                        let consumer_method = extract_http_method_from_line(line);
+                        results.push((
+                            rel.clone(),
+                            format!("line:{}", line_no),
+                            url.clone(),
+                            consumer_method,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// True if `line` references `ident` as a whole identifier (not a substring of a longer
+/// name). Boundaries are non-`[A-Za-z0-9_]` characters.
+fn line_contains_identifier(line: &str, ident: &str) -> bool {
+    let bytes = line.as_bytes();
+    let ib = ident.as_bytes();
+    if ib.is_empty() {
+        return false;
+    }
+    let mut i = 0;
+    while let Some(pos) = line[i..].find(ident) {
+        let start = i + pos;
+        let end = start + ib.len();
+        let before_ok = start == 0 || !is_ident_byte(bytes[start - 1]);
+        let after_ok = end >= bytes.len() || !is_ident_byte(bytes[end]);
+        if before_ok && after_ok {
+            return true;
+        }
+        i = start + 1;
+    }
+    false
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
 }
 
 fn walk_for_urls(
@@ -739,6 +967,80 @@ fn walk_for_contracts(
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Scan source files for import statements matching package search terms.
+/// Returns (relative_file, line_number, import_text).
+fn scan_source_for_package_imports(
+    root: &Path,
+    search_terms: &[&str],
+    _repo_name: &str,
+) -> Vec<(String, usize, String)> {
+    const SKIP_DIRS: &[&str] = &[
+        ".infigraph",
+        ".git",
+        "node_modules",
+        "target",
+        "build",
+        "dist",
+        "__pycache__",
+        ".venv",
+    ];
+    let mut results = Vec::new();
+    walk_for_imports(root, root, SKIP_DIRS, search_terms, &mut results);
+    results
+}
+
+fn walk_for_imports(
+    base: &Path,
+    dir: &Path,
+    skip: &[&str],
+    terms: &[&str],
+    results: &mut Vec<(String, usize, String)>,
+) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if path.is_dir() {
+            if skip.contains(&name_str.as_ref()) {
+                continue;
+            }
+            walk_for_imports(base, &path, skip, terms, results);
+        } else if name_str.ends_with(".py") || name_str.ends_with(".toml") {
+            let rel = path
+                .strip_prefix(base)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if is_test_or_doc_file(&rel) {
+                continue;
+            }
+            let content = match std::fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            for (line_num, line) in content.lines().enumerate() {
+                let trimmed = line.trim();
+                let is_import = trimmed.starts_with("from ") || trimmed.starts_with("import ");
+                let is_toml_dep = name_str.ends_with(".toml")
+                    && (trimmed.contains("dependencies") || trimmed.contains("packages"));
+                if !is_import && !is_toml_dep {
+                    continue;
+                }
+                for term in terms {
+                    if trimmed.contains(term) {
+                        results.push((rel.clone(), line_num + 1, trimmed.to_string()));
+                        break;
                     }
                 }
             }
