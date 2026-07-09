@@ -5,6 +5,7 @@ pub mod search;
 pub mod store;
 pub mod watch;
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -28,6 +29,7 @@ pub struct DocIndexResult {
     pub total_files: usize,
     pub indexed_files: usize,
     pub total_chunks: usize,
+    pub bfs_discovered: usize,
 }
 
 impl DocIndex {
@@ -91,6 +93,7 @@ impl DocIndex {
                 total_files: 0,
                 indexed_files: 0,
                 total_chunks: 0,
+                bfs_discovered: 0,
             });
         }
 
@@ -177,20 +180,32 @@ impl DocIndex {
         }
 
         // Extract links from indexed docs and create LINKS_TO edges
+        let mut all_doc_ids: HashSet<String> = {
+            let existing = store.get_doc_hashes().unwrap_or_default();
+            existing.keys().cloned().collect()
+        };
         if !results.is_empty() {
-            let all_doc_ids: std::collections::HashSet<String> = {
-                let existing = store.get_doc_hashes().unwrap_or_default();
-                existing.keys().cloned().collect()
-            };
             for (doc, _) in &results {
                 links::extract_and_link_doc(store, doc, &all_doc_ids);
             }
         }
 
+        // BFS: follow links to docs outside the doc root but within the repo
+        let bfs_discovered = if let Some(repo_root) = find_repo_root(&self.root) {
+            let n = self.bfs_follow_links(store, &mut all_doc_ids, &repo_root, 2, 50)?;
+            if n > 0 {
+                eprintln!("BFS: discovered and indexed {} doc(s) outside root", n);
+            }
+            n
+        } else {
+            0
+        };
+
         Ok(DocIndexResult {
             total_files: total,
             indexed_files: indexed,
             total_chunks,
+            bfs_discovered,
         })
     }
 
@@ -229,6 +244,186 @@ impl DocIndex {
             }
         }
         Ok(())
+    }
+
+    fn bfs_follow_links(
+        &self,
+        store: &DocStore,
+        indexed_docs: &mut HashSet<String>,
+        repo_root: &Path,
+        max_depth: usize,
+        max_extra: usize,
+    ) -> Result<usize> {
+        let ignore_dirs = [
+            ".infigraph",
+            ".git",
+            "node_modules",
+            "__pycache__",
+            ".venv",
+            "venv",
+            "target",
+            "build",
+            "dist",
+            ".tox",
+        ];
+        let repo_root = repo_root
+            .canonicalize()
+            .unwrap_or_else(|_| repo_root.to_path_buf());
+        let root_canonical = self
+            .root
+            .canonicalize()
+            .unwrap_or_else(|_| self.root.clone());
+        let mut total_new = 0usize;
+        let mut frontier: Vec<PathBuf> = indexed_docs
+            .iter()
+            .filter_map(|rel| {
+                let p = self.root.join(rel);
+                p.canonicalize().ok().filter(|c| c.is_file())
+            })
+            .collect();
+
+        for _depth in 0..max_depth {
+            if frontier.is_empty() || total_new >= max_extra {
+                break;
+            }
+            let mut next_frontier = Vec::new();
+
+            for doc_path in &frontier {
+                if total_new >= max_extra {
+                    break;
+                }
+                let text = match std::fs::read_to_string(doc_path) {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                };
+                let doc_file = doc_path.to_string_lossy();
+                let extracted_links = links::extract_links(&text, &doc_file);
+
+                for link in &extracted_links {
+                    if total_new >= max_extra {
+                        break;
+                    }
+                    let abs = match links::resolve_link_to_abs_path(&link.url, doc_path) {
+                        Some(p) => p,
+                        None => continue,
+                    };
+                    if !is_document_file(&abs) {
+                        continue;
+                    }
+                    // Skip symlinks (check before canonicalize)
+                    if let Ok(meta) = std::fs::symlink_metadata(&abs) {
+                        if meta.file_type().is_symlink() {
+                            continue;
+                        }
+                    }
+                    let abs = abs.canonicalize().unwrap_or(abs);
+                    if !abs.starts_with(&repo_root) {
+                        continue;
+                    }
+                    // Check ignored dirs — only check path components relative to repo root
+                    let rel_to_repo = abs.strip_prefix(&repo_root).unwrap_or(&abs);
+                    let in_ignored = rel_to_repo.components().any(|c| {
+                        if let std::path::Component::Normal(s) = c {
+                            let s = s.to_string_lossy();
+                            ignore_dirs.contains(&s.as_ref()) || s.starts_with('.')
+                        } else {
+                            false
+                        }
+                    });
+                    if in_ignored {
+                        continue;
+                    }
+
+                    // Build relative ID (relative to doc root for consistency, or absolute if outside)
+                    let rel_id = if let Ok(rel) = abs.strip_prefix(&root_canonical) {
+                        rel.to_string_lossy().replace('\\', "/")
+                    } else {
+                        abs.to_string_lossy().replace('\\', "/")
+                    };
+
+                    if indexed_docs.contains(&rel_id) {
+                        continue;
+                    }
+
+                    // Index this file
+                    let bytes = match std::fs::read(&abs) {
+                        Ok(b) => b,
+                        Err(_) => continue,
+                    };
+                    let hash = {
+                        let mut h = Sha256::new();
+                        h.update(&bytes);
+                        format!("{:x}", h.finalize())
+                    };
+                    let ext = match abs.extension() {
+                        Some(e) => e.to_string_lossy().to_lowercase(),
+                        None => continue,
+                    };
+                    let doc = match extract::extract_document(&abs, &bytes, &ext) {
+                        Ok(d) => d,
+                        Err(_) => continue,
+                    };
+                    let strategy = ChunkStrategy::for_extension(&ext);
+                    let doc = ExtractedDoc {
+                        file: rel_id.clone(),
+                        content_hash: hash.clone(),
+                        ..doc
+                    };
+                    let chunks = chunk::chunk_document(&doc, &rel_id, &hash, strategy);
+
+                    let docs_ref = vec![&doc];
+                    let chunks_ref: Vec<&Chunk> = chunks.iter().collect();
+                    if store.upsert_all_parquet(&docs_ref, &chunks_ref).is_ok() {
+                        indexed_docs.insert(rel_id);
+                        next_frontier.push(abs);
+                        total_new += 1;
+                    }
+                }
+            }
+            frontier = next_frontier;
+        }
+
+        // Re-run link extraction for all docs (newly discovered may link to each other)
+        if total_new > 0 {
+            let all_hashes = store.get_doc_hashes().unwrap_or_default();
+            let all_ids: HashSet<String> = all_hashes.keys().cloned().collect();
+            for doc_id in all_ids.iter() {
+                let doc_path = if doc_id.starts_with('/') {
+                    PathBuf::from(doc_id)
+                } else {
+                    self.root.join(doc_id)
+                };
+                if let Ok(text) = std::fs::read_to_string(&doc_path) {
+                    let doc = ExtractedDoc {
+                        file: doc_id.clone(),
+                        title: None,
+                        content_hash: String::new(),
+                        format: extract::DocFormat::Markdown,
+                        text,
+                        page_count: None,
+                    };
+                    links::extract_and_link_doc(store, &doc, &all_ids);
+                }
+            }
+        }
+
+        Ok(total_new)
+    }
+}
+
+fn find_repo_root(start: &Path) -> Option<PathBuf> {
+    let mut dir = if start.is_dir() {
+        start.to_path_buf()
+    } else {
+        start.parent()?.to_path_buf()
+    };
+    loop {
+        if dir.join(".git").exists() {
+            return Some(dir);
+        }
+        if !dir.pop() {
+            return None;
+        }
     }
 }
 

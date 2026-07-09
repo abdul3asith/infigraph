@@ -611,5 +611,33 @@ pub fn tool_index_manifests(args: &Value) -> Result<String> {
             r.deps.len()
         ));
     }
+
+    // Create LINKS_TO edges from manifests to indexed docs via doc_urls
+    if let Ok(doc_idx) = open_doc_index(args) {
+        if let Some(doc_store) = doc_idx.store() {
+            let all_doc_ids: std::collections::HashSet<String> = doc_store
+                .get_doc_hashes()
+                .unwrap_or_default()
+                .keys()
+                .cloned()
+                .collect();
+            let mut linked = 0usize;
+            for r in &results {
+                if !r.doc_urls.is_empty() {
+                    infigraph_docs::links::link_manifest_doc_urls(
+                        doc_store,
+                        &r.manifest_file,
+                        &r.doc_urls,
+                        &all_doc_ids,
+                    );
+                    linked += r.doc_urls.len();
+                }
+            }
+            if linked > 0 {
+                out.push_str(&format!("\nLinked {} manifest doc URLs\n", linked));
+            }
+        }
+    }
+
     Ok(out)
 }

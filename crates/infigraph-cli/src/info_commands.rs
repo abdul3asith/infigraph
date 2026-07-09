@@ -170,6 +170,31 @@ pub(crate) fn cmd_index_manifests(root: &Path) -> Result<()> {
             r.deps.len()
         );
     }
+
+    // Create LINKS_TO edges from manifests to indexed docs via doc_urls
+    if let Ok(mut doc_idx) = infigraph_docs::DocIndex::open(root) {
+        if doc_idx.init().is_ok() {
+            if let Some(doc_store) = doc_idx.store() {
+                let all_doc_ids: std::collections::HashSet<String> = doc_store
+                    .get_doc_hashes()
+                    .unwrap_or_default()
+                    .keys()
+                    .cloned()
+                    .collect();
+                for r in &results {
+                    if !r.doc_urls.is_empty() {
+                        infigraph_docs::links::link_manifest_doc_urls(
+                            doc_store,
+                            &r.manifest_file,
+                            &r.doc_urls,
+                            &all_doc_ids,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 

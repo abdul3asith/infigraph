@@ -688,6 +688,7 @@ impl CozoStore {
             "complexity".into(),
             "parameters".into(),
             "return_type".into(),
+            "category".into(),
         ];
         let data_rows: Vec<Vec<DataValue>> = rows
             .iter()
@@ -707,6 +708,7 @@ impl CozoStore {
                     DataValue::from(r.11),
                     DataValue::Str(r.12.clone().into()),
                     DataValue::Str(r.13.clone().into()),
+                    DataValue::Str("impl".into()),
                 ]
             })
             .collect();

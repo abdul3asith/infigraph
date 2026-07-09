@@ -164,6 +164,28 @@ impl ConfluenceSync {
             }
         }
 
+        // Cross-link: confluence pages → local docs
+        let all_doc_hashes = store.get_doc_hashes().unwrap_or_default();
+        let all_doc_ids: Vec<&str> = all_doc_hashes.keys().map(|s| s.as_str()).collect();
+        for (from_file_id, links) in &all_link_data {
+            if !from_file_id.starts_with("confluence://") {
+                continue;
+            }
+            for link in links {
+                if link.link_type != "external" {
+                    continue;
+                }
+                if let Some(doc_path) = extract_doc_path_from_url(&link.url) {
+                    if let Some(target) = all_doc_ids.iter().find(|id| id.ends_with(&doc_path)) {
+                        if *target != from_file_id.as_str() {
+                            let _ = store.create_link(from_file_id, target, &link.url, "cross_ref");
+                            links_created += 1;
+                        }
+                    }
+                }
+            }
+        }
+
         let deleted = self.remove_deleted_pages(store, page_ids)?;
 
         let remote_ids: Vec<String> = all_pages.iter().map(|p| p.id.clone()).collect();
@@ -1008,4 +1030,93 @@ fn save_cursor(path: &Path, cursor: &SyncCursor) -> Result<()> {
     let json = serde_json::to_string_pretty(cursor)?;
     std::fs::write(path, json).context("write sync cursor")?;
     Ok(())
+}
+
+/// Extract a file path from a URL (GitHub/GitLab blob links, raw relative paths).
+pub(crate) fn extract_doc_path_from_url(url: &str) -> Option<String> {
+    // GitHub: https://github.com/org/repo/blob/branch/path/to/file.md
+    if let Some(idx) = url.find("/blob/") {
+        let after_blob = &url[idx + 6..]; // skip "/blob/"
+                                          // Skip the branch name (first path segment)
+        if let Some(slash) = after_blob.find('/') {
+            let path = &after_blob[slash + 1..];
+            if !path.is_empty() {
+                return Some(
+                    path.split('?')
+                        .next()
+                        .unwrap_or(path)
+                        .split('#')
+                        .next()
+                        .unwrap_or(path)
+                        .to_string(),
+                );
+            }
+        }
+    }
+    // GitLab: /-/blob/branch/path or /-/tree/branch/path
+    if let Some(idx) = url.find("/-/blob/") {
+        let after = &url[idx + 8..];
+        if let Some(slash) = after.find('/') {
+            let path = &after[slash + 1..];
+            if !path.is_empty() {
+                return Some(
+                    path.split('?')
+                        .next()
+                        .unwrap_or(path)
+                        .split('#')
+                        .next()
+                        .unwrap_or(path)
+                        .to_string(),
+                );
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_doc_path_github() {
+        assert_eq!(
+            extract_doc_path_from_url("https://github.com/org/repo/blob/main/docs/README.md"),
+            Some("docs/README.md".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_doc_path_github_with_fragment() {
+        assert_eq!(
+            extract_doc_path_from_url(
+                "https://github.com/org/repo/blob/main/docs/guide.md#section"
+            ),
+            Some("docs/guide.md".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_doc_path_gitlab() {
+        assert_eq!(
+            extract_doc_path_from_url("https://gitlab.com/org/repo/-/blob/main/docs/README.md"),
+            Some("docs/README.md".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_doc_path_non_repo_url() {
+        assert_eq!(
+            extract_doc_path_from_url("https://example.com/random/page"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_extract_doc_path_no_path_after_branch() {
+        assert_eq!(
+            extract_doc_path_from_url("https://github.com/org/repo/blob/main"),
+            None
+        );
+    }
 }

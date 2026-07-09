@@ -335,6 +335,16 @@ impl DocStore {
         Ok(())
     }
 
+    pub fn ensure_document_node(&self, doc_id: &str) -> Result<()> {
+        let conn = self.connection()?;
+        conn.query(&format!(
+            "MERGE (d:Document {{id: '{}'}})",
+            escape_str(doc_id),
+        ))
+        .map_err(|e| anyhow::anyhow!("ensure document node: {e}"))?;
+        Ok(())
+    }
+
     pub fn create_link(
         &self,
         from_doc_id: &str,

@@ -633,3 +633,351 @@ fn test_docindex_ignores_hidden_and_build_dirs() {
         "should only find real.md, not files in ignored dirs"
     );
 }
+
+// --- BFS tests ---
+
+fn create_doc_file(base: &Path, rel_path: &str, content: &str) {
+    let full = base.join(rel_path);
+    if let Some(parent) = full.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(full, content).unwrap();
+}
+
+#[test]
+fn test_bfs_follows_link_outside_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    create_doc_file(
+        &repo,
+        "docs/index.md",
+        "# Index\n\nSee [readme](../README.md).\n",
+    );
+    create_doc_file(&repo, "README.md", "# Project README\n\nHello.\n");
+
+    let doc_root = repo.join("docs");
+    let mut idx = DocIndex::open(&doc_root).unwrap();
+    idx.init().unwrap();
+    let result = idx.index().unwrap();
+
+    assert_eq!(result.total_files, 1, "only index.md in doc root");
+    assert_eq!(result.bfs_discovered, 1, "BFS should discover README.md");
+
+    let store = idx.store().unwrap();
+    let hashes = store.get_doc_hashes().unwrap();
+    assert_eq!(hashes.len(), 2, "should have 2 docs total");
+}
+
+#[test]
+fn test_bfs_respects_repo_boundary() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    create_doc_file(
+        &repo,
+        "docs/index.md",
+        "# Index\n\nSee [outside](../../outside/file.md).\n",
+    );
+    create_doc_file(tmp.path(), "outside/file.md", "# Outside\n\nContent.\n");
+
+    let doc_root = repo.join("docs");
+    let mut idx = DocIndex::open(&doc_root).unwrap();
+    idx.init().unwrap();
+    let result = idx.index().unwrap();
+
+    assert_eq!(
+        result.bfs_discovered, 0,
+        "should not follow links outside repo"
+    );
+    let store = idx.store().unwrap();
+    let hashes = store.get_doc_hashes().unwrap();
+    assert_eq!(hashes.len(), 1, "only index.md");
+}
+
+#[test]
+fn test_bfs_max_depth() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    create_doc_file(&repo, "docs/a.md", "# A\n\n[b](../level1/b.md)\n");
+    create_doc_file(&repo, "level1/b.md", "# B\n\n[c](../level2/c.md)\n");
+    create_doc_file(&repo, "level2/c.md", "# C\n\n[d](../level3/d.md)\n");
+    create_doc_file(&repo, "level3/d.md", "# D\n\nEnd.\n");
+
+    let doc_root = repo.join("docs");
+    let mut idx = DocIndex::open(&doc_root).unwrap();
+    idx.init().unwrap();
+    let result = idx.index().unwrap();
+
+    // depth 0: a.md (in root), depth 1: b.md, depth 2: c.md, depth 3: d.md (too deep)
+    assert!(result.bfs_discovered >= 2, "should discover b.md and c.md");
+    let store = idx.store().unwrap();
+    let hashes = store.get_doc_hashes().unwrap();
+    // d.md should NOT be indexed (depth 3 > max_depth 2)
+    let has_d = hashes.keys().any(|k| k.contains("level3"));
+    assert!(!has_d, "d.md should not be indexed (too deep)");
+}
+
+#[test]
+fn test_bfs_skips_non_doc_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    create_doc_file(
+        &repo,
+        "docs/index.md",
+        "# Index\n\n[code](../src/main.rs)\n",
+    );
+    create_doc_file(&repo, "src/main.rs", "fn main() {}\n");
+
+    let doc_root = repo.join("docs");
+    let mut idx = DocIndex::open(&doc_root).unwrap();
+    idx.init().unwrap();
+    let result = idx.index().unwrap();
+
+    assert_eq!(result.bfs_discovered, 0, "should not index .rs files");
+}
+
+#[test]
+fn test_bfs_skips_symlinks() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    create_doc_file(&repo, "docs/index.md", "# Index\n\n[link](../linked.md)\n");
+    create_doc_file(&repo, "real.md", "# Real\n\nContent.\n");
+    // Create symlink
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(repo.join("real.md"), repo.join("linked.md")).unwrap();
+    #[cfg(not(unix))]
+    {
+        // On non-unix, just create a regular file so the test still runs
+        create_doc_file(&repo, "linked.md", "# Linked\n\nContent.\n");
+    }
+
+    let doc_root = repo.join("docs");
+    let mut idx = DocIndex::open(&doc_root).unwrap();
+    idx.init().unwrap();
+    let result = idx.index().unwrap();
+
+    #[cfg(unix)]
+    assert_eq!(result.bfs_discovered, 0, "should not follow symlinks");
+}
+
+#[test]
+fn test_bfs_circular_links() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    create_doc_file(&repo, "docs/a.md", "# A\n\n[b](../other/b.md)\n");
+    create_doc_file(&repo, "other/b.md", "# B\n\n[a](../docs/a.md)\n");
+
+    let doc_root = repo.join("docs");
+    let mut idx = DocIndex::open(&doc_root).unwrap();
+    idx.init().unwrap();
+    let result = idx.index().unwrap();
+
+    assert_eq!(result.bfs_discovered, 1, "should discover b.md once");
+    let store = idx.store().unwrap();
+    let hashes = store.get_doc_hashes().unwrap();
+    assert_eq!(hashes.len(), 2, "a.md + b.md");
+}
+
+// --- Confluence linking tests ---
+
+#[test]
+fn test_doc_links_to_confluence_page() {
+    let (store, _dir) = temp_store();
+
+    // Create a local doc and a confluence doc in the same store
+    let local_doc = sample_doc("docs/design.md");
+    let confluence_doc = ExtractedDoc {
+        file: "confluence://ENG/99999".to_string(),
+        title: Some("Design Doc".to_string()),
+        content_hash: "confhash".to_string(),
+        format: DocFormat::Markdown,
+        text: "Confluence page content.".to_string(),
+        page_count: Some(1),
+    };
+    let c_local = sample_chunk("docs/design.md", 0);
+    let c_conf = Chunk {
+        id: "confluence://ENG/99999::0".to_string(),
+        doc_file: "confluence://ENG/99999".to_string(),
+        index: 0,
+        heading: None,
+        text: "Confluence page content.".to_string(),
+        start_offset: 0,
+        end_offset: 24,
+        content_hash: "confhash".to_string(),
+        page: None,
+    };
+    store
+        .upsert_all_parquet(&[&local_doc, &confluence_doc], &[&c_local, &c_conf])
+        .unwrap();
+
+    let source_doc = ExtractedDoc {
+        file: "docs/design.md".to_string(),
+        title: Some("Design".to_string()),
+        content_hash: "hash1".to_string(),
+        format: DocFormat::Markdown,
+        text: "See [design](https://wiki.example.com/wiki/spaces/ENG/pages/99999/Design+Doc) for details."
+            .to_string(),
+        page_count: None,
+    };
+
+    let all_doc_ids: HashSet<String> = [
+        "docs/design.md".to_string(),
+        "confluence://ENG/99999".to_string(),
+    ]
+    .into_iter()
+    .collect();
+
+    extract_and_link_doc(&store, &source_doc, &all_doc_ids);
+
+    let conn = store.connection().unwrap();
+    let result = conn
+        .query(
+            "MATCH (a:Document)-[l:LINKS_TO]->(b:Document) WHERE a.id = 'docs/design.md' RETURN b.id, l.link_type",
+        )
+        .unwrap();
+    let mut linked_to_confluence = false;
+    for row in result {
+        let target = row[0].to_string();
+        if target == "confluence://ENG/99999" {
+            linked_to_confluence = true;
+        }
+    }
+    assert!(
+        linked_to_confluence,
+        "should create LINKS_TO edge from local doc to confluence page"
+    );
+}
+
+#[test]
+fn test_confluence_page_id_no_space_no_link() {
+    let (store, _dir) = temp_store();
+
+    let local_doc = sample_doc("docs/notes.md");
+    let c = sample_chunk("docs/notes.md", 0);
+    store.upsert_all_parquet(&[&local_doc], &[&c]).unwrap();
+
+    let source_doc = ExtractedDoc {
+        file: "docs/notes.md".to_string(),
+        title: Some("Notes".to_string()),
+        content_hash: "hash1".to_string(),
+        format: DocFormat::Markdown,
+        text: "See [page](https://wiki.example.com/pages?pageId=12345) for info.".to_string(),
+        page_count: None,
+    };
+
+    let all_doc_ids: HashSet<String> = ["docs/notes.md".to_string()].into_iter().collect();
+    extract_and_link_doc(&store, &source_doc, &all_doc_ids);
+
+    let conn = store.connection().unwrap();
+    let result = conn
+        .query(
+            "MATCH (a:Document)-[:LINKS_TO]->(b:Document) WHERE a.id = 'docs/notes.md' RETURN b.id",
+        )
+        .unwrap();
+    let count: usize = result.count();
+    assert_eq!(
+        count, 0,
+        "pageId-only URL should not create link (no space)"
+    );
+}
+
+#[test]
+fn test_confluence_page_id_non_numeric_no_link() {
+    let (store, _dir) = temp_store();
+
+    let local_doc = sample_doc("docs/notes.md");
+    let c = sample_chunk("docs/notes.md", 0);
+    store.upsert_all_parquet(&[&local_doc], &[&c]).unwrap();
+
+    let source_doc = ExtractedDoc {
+        file: "docs/notes.md".to_string(),
+        title: Some("Notes".to_string()),
+        content_hash: "hash1".to_string(),
+        format: DocFormat::Markdown,
+        text: "See [overview](https://wiki.example.com/wiki/spaces/TEAM/pages/overview) for info."
+            .to_string(),
+        page_count: None,
+    };
+
+    let all_doc_ids: HashSet<String> = ["docs/notes.md".to_string()].into_iter().collect();
+    extract_and_link_doc(&store, &source_doc, &all_doc_ids);
+
+    let conn = store.connection().unwrap();
+    let result = conn
+        .query(
+            "MATCH (a:Document)-[:LINKS_TO]->(b:Document) WHERE a.id = 'docs/notes.md' RETURN b.id",
+        )
+        .unwrap();
+    let count: usize = result.count();
+    assert_eq!(count, 0, "non-numeric page ID should not create link");
+}
+
+#[test]
+fn test_extract_doc_path_from_url_github() {
+    use infigraph_docs::links::extract_doc_path_from_url;
+    assert_eq!(
+        extract_doc_path_from_url("https://github.com/org/repo/blob/main/docs/README.md"),
+        Some("docs/README.md".to_string())
+    );
+    assert_eq!(
+        extract_doc_path_from_url("https://github.com/org/repo/blob/main/docs/guide.md#section"),
+        Some("docs/guide.md".to_string())
+    );
+    assert_eq!(
+        extract_doc_path_from_url("https://gitlab.com/org/repo/-/blob/main/docs/README.md"),
+        Some("docs/README.md".to_string())
+    );
+    assert_eq!(extract_doc_path_from_url("https://example.com/docs"), None);
+    assert_eq!(extract_doc_path_from_url("https://docs.rs/foo"), None);
+}
+
+#[test]
+fn test_link_manifest_doc_urls() {
+    use infigraph_docs::links::link_manifest_doc_urls;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("docs.kuzu");
+    let store = DocStore::open(&db_path).unwrap();
+
+    // Insert a doc node
+    let doc = ExtractedDoc {
+        file: "docs/README.md".to_string(),
+        title: Some("README".to_string()),
+        content_hash: "abc123".to_string(),
+        format: DocFormat::Markdown,
+        text: "Hello".to_string(),
+        page_count: None,
+    };
+    let chunks = chunk_document(
+        &doc,
+        "docs/README.md",
+        "abc123",
+        ChunkStrategy::HeadingBounded,
+    );
+    let docs_ref = vec![&doc];
+    let chunks_ref: Vec<&Chunk> = chunks.iter().collect();
+    store.upsert_all_parquet(&docs_ref, &chunks_ref).unwrap();
+
+    let mut all_doc_ids = HashSet::new();
+    all_doc_ids.insert("docs/README.md".to_string());
+
+    let doc_urls = vec![
+        "https://github.com/org/repo/blob/main/docs/README.md".to_string(),
+        "https://example.com/unrelated".to_string(),
+    ];
+
+    link_manifest_doc_urls(&store, "Cargo.toml", &doc_urls, &all_doc_ids);
+
+    // Verify LINKS_TO edge created for matching URL
+    let conn = store.connection().unwrap();
+    let result = conn
+        .query("MATCH (a:Document)-[e:LINKS_TO]->(b:Document) RETURN a.id, b.id, e.link_type")
+        .unwrap();
+    let rows: Vec<_> = result.collect();
+    assert_eq!(rows.len(), 1);
+}

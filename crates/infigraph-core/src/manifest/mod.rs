@@ -23,6 +23,7 @@ pub struct ManifestResult {
     pub ecosystem: String,
     pub manifest_file: String,
     pub deps: Vec<DepEntry>,
+    pub doc_urls: Vec<String>,
 }
 
 /// Scan a project root for manifests, parse them, store deps in graph.
@@ -137,10 +138,40 @@ fn parse_package_json(content: &str, path: &Path) -> Result<ManifestResult> {
         }
     }
 
+    let mut doc_urls = Vec::new();
+    if let Some(s) = v.get("homepage").and_then(|h| h.as_str()) {
+        if !s.is_empty() {
+            doc_urls.push(s.to_string());
+        }
+    }
+    if let Some(repo) = v.get("repository") {
+        if let Some(s) = repo.as_str() {
+            if !s.is_empty() {
+                doc_urls.push(s.to_string());
+            }
+        } else if let Some(s) = repo.get("url").and_then(|u| u.as_str()) {
+            if !s.is_empty() {
+                doc_urls.push(s.to_string());
+            }
+        }
+    }
+    if let Some(bugs) = v.get("bugs") {
+        if let Some(s) = bugs.as_str() {
+            if !s.is_empty() {
+                doc_urls.push(s.to_string());
+            }
+        } else if let Some(s) = bugs.get("url").and_then(|u| u.as_str()) {
+            if !s.is_empty() {
+                doc_urls.push(s.to_string());
+            }
+        }
+    }
+
     Ok(ManifestResult {
         ecosystem: "npm".to_string(),
         manifest_file: path.to_string_lossy().replace('\\', "/"),
         deps,
+        doc_urls,
     })
 }
 
@@ -178,10 +209,22 @@ fn parse_cargo_toml(content: &str, path: &Path) -> Result<ManifestResult> {
         }
     }
 
+    let mut doc_urls = Vec::new();
+    if let Some(pkg) = v.get("package") {
+        for key in &["homepage", "repository", "documentation"] {
+            if let Some(s) = pkg.get(*key).and_then(|v| v.as_str()) {
+                if !s.is_empty() {
+                    doc_urls.push(s.to_string());
+                }
+            }
+        }
+    }
+
     Ok(ManifestResult {
         ecosystem: "cargo".to_string(),
         manifest_file: path.to_string_lossy().replace('\\', "/"),
         deps,
+        doc_urls,
     })
 }
 
@@ -226,6 +269,7 @@ fn parse_go_mod(content: &str, path: &Path) -> Result<ManifestResult> {
         ecosystem: "go".to_string(),
         manifest_file: path.to_string_lossy().replace('\\', "/"),
         deps,
+        doc_urls: Vec::new(),
     })
 }
 
@@ -250,10 +294,27 @@ fn parse_pom_xml(content: &str, path: &Path) -> Result<ManifestResult> {
         });
     }
 
+    let mut doc_urls = Vec::new();
+    let url_re = regex::Regex::new(r"<url>\s*([^<]+?)\s*</url>").unwrap();
+    let scm_re = regex::Regex::new(r"<scm>\s*<url>\s*([^<]+?)\s*</url>").unwrap();
+    if let Some(cap) = url_re.captures(content) {
+        let u = cap[1].trim();
+        if !u.is_empty() {
+            doc_urls.push(u.to_string());
+        }
+    }
+    if let Some(cap) = scm_re.captures(content) {
+        let u = cap[1].trim();
+        if !u.is_empty() {
+            doc_urls.push(u.to_string());
+        }
+    }
+
     Ok(ManifestResult {
         ecosystem: "maven".to_string(),
         manifest_file: path.to_string_lossy().replace('\\', "/"),
         deps,
+        doc_urls,
     })
 }
 
@@ -289,6 +350,7 @@ fn parse_gradle(content: &str, path: &Path) -> Result<ManifestResult> {
         ecosystem: "gradle".to_string(),
         manifest_file: path.to_string_lossy().replace('\\', "/"),
         deps,
+        doc_urls: Vec::new(),
     })
 }
 
@@ -322,6 +384,7 @@ fn parse_requirements_txt(content: &str, path: &Path) -> Result<ManifestResult> 
         ecosystem: "pip".to_string(),
         manifest_file: path.to_string_lossy().replace('\\', "/"),
         deps,
+        doc_urls: Vec::new(),
     })
 }
 
@@ -395,10 +458,26 @@ fn parse_pyproject_toml(content: &str, path: &Path) -> Result<ManifestResult> {
         }
     }
 
+    let mut doc_urls = Vec::new();
+    if let Some(urls) = v
+        .get("project")
+        .and_then(|p| p.get("urls"))
+        .and_then(|u| u.as_table())
+    {
+        for (_key, val) in urls {
+            if let Some(s) = val.as_str() {
+                if !s.is_empty() {
+                    doc_urls.push(s.to_string());
+                }
+            }
+        }
+    }
+
     Ok(ManifestResult {
         ecosystem: "pip".to_string(),
         manifest_file: path.to_string_lossy().replace('\\', "/"),
         deps,
+        doc_urls,
     })
 }
 
@@ -431,6 +510,7 @@ fn parse_gemfile(content: &str, path: &Path) -> Result<ManifestResult> {
         ecosystem: "gem".to_string(),
         manifest_file: path.to_string_lossy().replace('\\', "/"),
         deps,
+        doc_urls: Vec::new(),
     })
 }
 
@@ -458,6 +538,7 @@ fn parse_composer_json(content: &str, path: &Path) -> Result<ManifestResult> {
         ecosystem: "composer".to_string(),
         manifest_file: path.to_string_lossy().replace('\\', "/"),
         deps,
+        doc_urls: Vec::new(),
     })
 }
 
@@ -482,6 +563,7 @@ fn parse_packages_config(content: &str, path: &Path) -> Result<ManifestResult> {
         ecosystem: "nuget".to_string(),
         manifest_file: path.to_string_lossy().replace('\\', "/"),
         deps,
+        doc_urls: Vec::new(),
     })
 }
 
@@ -533,6 +615,7 @@ fn parse_pubspec_yaml(content: &str, path: &Path) -> Result<ManifestResult> {
         ecosystem: "pub".to_string(),
         manifest_file: path.to_string_lossy().replace('\\', "/"),
         deps,
+        doc_urls: Vec::new(),
     })
 }
 
@@ -578,6 +661,7 @@ fn scan_csproj_dir(
                         ecosystem: "nuget".to_string(),
                         manifest_file: path.to_string_lossy().replace('\\', "/"),
                         deps,
+                        doc_urls: Vec::new(),
                     };
                     let _ = store_manifest(store, &result);
                     results.push(result);
@@ -661,6 +745,7 @@ mod tests {
                 ecosystem: "pypi".to_string(),
                 is_dev: false,
             }],
+            doc_urls: Vec::new(),
         };
         store_manifest(&store, &result1).unwrap();
 
@@ -681,6 +766,7 @@ mod tests {
                 ecosystem: "pypi".to_string(),
                 is_dev: false,
             }],
+            doc_urls: Vec::new(),
         };
         store_manifest(&store, &result2).unwrap();
 
@@ -689,5 +775,82 @@ mod tests {
             .unwrap();
         assert_eq!(rows2.len(), 1);
         assert_eq!(rows2[0][0], "2.0");
+    }
+
+    #[test]
+    fn test_package_json_extracts_doc_urls() {
+        let content = r#"{"name":"foo","version":"1.0","homepage":"https://example.com/docs","repository":{"url":"https://github.com/org/foo"},"bugs":{"url":"https://github.com/org/foo/issues"},"dependencies":{}}"#;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("package.json");
+        std::fs::write(&path, content).unwrap();
+        let result = parse_manifest(&path).unwrap();
+        assert_eq!(result.doc_urls.len(), 3);
+        assert!(result
+            .doc_urls
+            .contains(&"https://example.com/docs".to_string()));
+        assert!(result
+            .doc_urls
+            .contains(&"https://github.com/org/foo".to_string()));
+        assert!(result
+            .doc_urls
+            .contains(&"https://github.com/org/foo/issues".to_string()));
+    }
+
+    #[test]
+    fn test_cargo_toml_extracts_doc_urls() {
+        let content = r#"
+[package]
+name = "foo"
+version = "0.1.0"
+homepage = "https://example.com"
+repository = "https://github.com/org/foo"
+documentation = "https://docs.rs/foo"
+
+[dependencies]
+"#;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("Cargo.toml");
+        std::fs::write(&path, content).unwrap();
+        let result = parse_manifest(&path).unwrap();
+        assert_eq!(result.doc_urls.len(), 3);
+        assert!(result.doc_urls.contains(&"https://example.com".to_string()));
+        assert!(result
+            .doc_urls
+            .contains(&"https://github.com/org/foo".to_string()));
+        assert!(result.doc_urls.contains(&"https://docs.rs/foo".to_string()));
+    }
+
+    #[test]
+    fn test_pyproject_extracts_project_urls() {
+        let content = r#"
+[project]
+name = "foo"
+
+[project.urls]
+Documentation = "https://docs.example.com"
+Repository = "https://github.com/org/foo"
+"#;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("pyproject.toml");
+        std::fs::write(&path, content).unwrap();
+        let result = parse_manifest(&path).unwrap();
+        assert_eq!(result.doc_urls.len(), 2);
+        assert!(result
+            .doc_urls
+            .contains(&"https://docs.example.com".to_string()));
+        assert!(result
+            .doc_urls
+            .contains(&"https://github.com/org/foo".to_string()));
+    }
+
+    #[test]
+    fn test_requirements_txt_no_doc_urls() {
+        let content = "requests==2.28\nflask>=2.0\n";
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("requirements.txt");
+        std::fs::write(&path, content).unwrap();
+        let result = parse_manifest(&path).unwrap();
+        assert!(result.doc_urls.is_empty());
+        assert_eq!(result.deps.len(), 2);
     }
 }

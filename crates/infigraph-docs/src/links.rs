@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 use regex::Regex;
 
@@ -6,10 +7,10 @@ use crate::extract::ExtractedDoc;
 use crate::store::DocStore;
 
 #[derive(Debug)]
-struct DocLink {
-    url: String,
-    link_type: String,
-    target_doc_id: Option<String>,
+pub(crate) struct DocLink {
+    pub(crate) url: String,
+    pub(crate) link_type: String,
+    pub(crate) target_doc_id: Option<String>,
 }
 
 pub fn extract_and_link_doc(store: &DocStore, doc: &ExtractedDoc, all_doc_ids: &HashSet<String>) {
@@ -29,7 +30,7 @@ pub fn extract_and_link_doc(store: &DocStore, doc: &ExtractedDoc, all_doc_ids: &
     }
 }
 
-fn extract_links(text: &str, doc_file: &str) -> Vec<DocLink> {
+pub(crate) fn extract_links(text: &str, doc_file: &str) -> Vec<DocLink> {
     let mut links = Vec::new();
 
     // Markdown links: [text](url)
@@ -133,27 +134,130 @@ fn resolve_relative_path(url: &str, doc_file: &str) -> String {
     parts.join("/")
 }
 
+/// Resolve a link URL to an absolute path. Returns the resolved (non-canonicalized)
+/// path if the file exists. Caller should canonicalize if needed for comparison.
+pub(crate) fn resolve_link_to_abs_path(url: &str, doc_abs_path: &Path) -> Option<PathBuf> {
+    let path = url.split('#').next().unwrap_or(url);
+    let path = path.split('?').next().unwrap_or(path);
+    if path.is_empty() {
+        return None;
+    }
+    if path.starts_with("http://")
+        || path.starts_with("https://")
+        || path.starts_with("//")
+        || path.contains("confluence")
+        || path.contains("atlassian")
+        || path.contains("jira")
+    {
+        return None;
+    }
+    let parent = doc_abs_path.parent()?;
+    let resolved = parent.join(path);
+    if resolved.exists() {
+        Some(resolved)
+    } else {
+        None
+    }
+}
+
 fn extract_confluence_page_id(url: &str) -> Option<String> {
     // /wiki/spaces/SPACE/pages/PAGEID/...
     if url.contains("/pages/") {
         let parts: Vec<&str> = url.split('/').collect();
-        if let Some(idx) = parts.iter().position(|&p| p == "pages") {
-            if let Some(id) = parts.get(idx + 1) {
-                if id.chars().all(|c| c.is_ascii_digit()) {
-                    // Can't resolve to doc_id without knowing space — return None
-                    // Confluence docs use confluence://SPACE/ID format
-                    return None;
+        if let Some(pages_idx) = parts.iter().position(|&p| p == "pages") {
+            if let Some(id) = parts.get(pages_idx + 1) {
+                if !id.is_empty() && id.chars().all(|c| c.is_ascii_digit()) {
+                    if let Some(spaces_idx) = parts.iter().position(|&p| p == "spaces") {
+                        if let Some(space) = parts.get(spaces_idx + 1) {
+                            if !space.is_empty() && *space != "pages" {
+                                return Some(format!("confluence://{}/{}", space, id));
+                            }
+                        }
+                    }
                 }
             }
         }
     }
-    if url.contains("pageId=") {
-        if let Some(id) = url.split("pageId=").nth(1) {
-            let id = id.split('&').next().unwrap_or(id);
-            if id.chars().all(|c| c.is_ascii_digit()) {
-                return None;
+    // ?pageId=12345 — no space info available
+    None
+}
+
+/// Extract a file path from a GitHub/GitLab blob URL.
+pub fn extract_doc_path_from_url(url: &str) -> Option<String> {
+    // GitHub: https://github.com/org/repo/blob/branch/path/to/file.md
+    if let Some(idx) = url.find("/blob/") {
+        let after_blob = &url[idx + 6..];
+        if let Some(slash) = after_blob.find('/') {
+            let path = &after_blob[slash + 1..];
+            if !path.is_empty() {
+                return Some(
+                    path.split('?')
+                        .next()
+                        .unwrap_or(path)
+                        .split('#')
+                        .next()
+                        .unwrap_or(path)
+                        .to_string(),
+                );
+            }
+        }
+    }
+    // GitLab: /-/blob/branch/path
+    if let Some(idx) = url.find("/-/blob/") {
+        let after = &url[idx + 8..];
+        if let Some(slash) = after.find('/') {
+            let path = &after[slash + 1..];
+            if !path.is_empty() {
+                return Some(
+                    path.split('?')
+                        .next()
+                        .unwrap_or(path)
+                        .split('#')
+                        .next()
+                        .unwrap_or(path)
+                        .to_string(),
+                );
             }
         }
     }
     None
+}
+
+/// Create LINKS_TO edges from manifest files to indexed docs based on doc_urls.
+/// Creates a Document node for the manifest file if one doesn't already exist.
+pub fn link_manifest_doc_urls(
+    store: &DocStore,
+    manifest_file: &str,
+    doc_urls: &[String],
+    all_doc_ids: &HashSet<String>,
+) {
+    if doc_urls.is_empty() {
+        return;
+    }
+    // Ensure manifest has a Document node so LINKS_TO edges can be created
+    let _ = store.ensure_document_node(manifest_file);
+
+    for url in doc_urls {
+        // Try confluence page ID match
+        if let Some(conf_id) = extract_confluence_page_id(url) {
+            if all_doc_ids.contains(&conf_id) {
+                let _ = store.create_link(manifest_file, &conf_id, url, "manifest_ref");
+            }
+            continue;
+        }
+        // Try GitHub/GitLab file path extraction
+        if let Some(doc_path) = extract_doc_path_from_url(url) {
+            if all_doc_ids.contains(&doc_path) {
+                let _ = store.create_link(manifest_file, &doc_path, url, "manifest_ref");
+            } else {
+                // Try suffix match (doc_path might be docs/README.md, indexed as README.md)
+                for doc_id in all_doc_ids {
+                    if doc_id.ends_with(&doc_path) || doc_path.ends_with(doc_id.as_str()) {
+                        let _ = store.create_link(manifest_file, doc_id, url, "manifest_ref");
+                        break;
+                    }
+                }
+            }
+        }
+    }
 }
