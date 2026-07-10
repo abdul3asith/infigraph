@@ -463,6 +463,8 @@ fn handle_tools_call(id: &Value, request: &Value) -> Value {
         Ok(Ok(content)) => {
             let compressed =
                 infigraph_mcp::compress::compress_tool_output(&content, tool_name, &args);
+            let compressed =
+                infigraph_mcp::session_context::apply_seen_dedup(&compressed, tool_name, &args);
             if metrics_enabled {
                 let raw_tokens = estimate_tokens(&content);
                 let comp_tokens = estimate_tokens(&compressed);
