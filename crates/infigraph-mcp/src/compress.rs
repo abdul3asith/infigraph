@@ -8,6 +8,7 @@ static BYPASS_TOOLS: &[&str] = &[
     "detect_taint_flows",
     "detect_interprocedural_taint",
     "detect_path_traversal",
+    "compress",
 ];
 
 pub fn compress_tool_output(raw: &str, tool_name: &str, args: &Value) -> String {
@@ -19,6 +20,10 @@ pub fn compress_tool_output(raw: &str, tool_name: &str, args: &Value) -> String 
         "get_doc_context" => compress_doc_context(raw, args),
         "find_all_references" => compress_references(raw, args),
         "get_architecture" => compress_architecture(raw, args),
+        "list_files" => compress_list_files(raw, args),
+        "detect_dead_code" => compress_dead_code(raw, args),
+        "get_api_surface" => compress_api_surface(raw, args),
+        "git_summary" => compress_git_summary(raw, args),
         _ => raw.to_string(),
     }
 }
@@ -349,6 +354,609 @@ fn compress_architecture(raw: &str, _args: &Value) -> String {
     out
 }
 
+fn compress_list_files(raw: &str, args: &Value) -> String {
+    // Flat file list → directory tree with file counts per leaf dir
+    // If glob was specified, show all files (user asked for specific subset)
+    if args.get("glob").and_then(|v| v.as_str()).is_some() {
+        return raw.to_string();
+    }
+
+    let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
+    if lines.len() < 20 {
+        return raw.to_string();
+    }
+
+    // Group by directory
+    let mut dirs: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    let mut root_files = 0usize;
+    for line in &lines {
+        let trimmed = line.trim();
+        if let Some(pos) = trimmed.rfind('/') {
+            let dir = &trimmed[..pos];
+            *dirs.entry(dir).or_default() += 1;
+        } else {
+            root_files += 1;
+        }
+    }
+
+    // Collapse child dirs into parents when parent has only one child subdir
+    // Just show dir → count
+    let mut out = String::with_capacity(raw.len() / 3);
+    out.push_str(&format!("{} files total:\n", lines.len()));
+    if root_files > 0 {
+        out.push_str(&format!("  ./ ({root_files} files)\n"));
+    }
+    for (dir, count) in &dirs {
+        out.push_str(&format!("  {dir}/ ({count} files)\n"));
+    }
+    out.push_str("\nUse list_files with glob pattern to see specific files.");
+    out
+}
+
+fn compress_dead_code(raw: &str, _args: &Value) -> String {
+    // Format: "Saved to ...\n(N lines, M bytes)\n\nPotentially dead code (K symbols):\n  Kind name (file)\n..."
+    // Truncated at 4 items by the tool itself. Compress by grouping first 4 by file.
+    if !raw.contains("Potentially dead code") {
+        return raw.to_string();
+    }
+
+    let mut lines = raw.lines();
+    let mut out = String::with_capacity(raw.len());
+
+    // Keep header lines until "Potentially dead code"
+    for line in &mut lines {
+        out.push_str(line);
+        out.push('\n');
+        if line.starts_with("Potentially dead code") {
+            break;
+        }
+    }
+
+    // Group symbols by file
+    let mut by_file: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // "Function name (file/path.rs)"
+        if let Some(paren_start) = trimmed.rfind('(') {
+            let file = trimmed[paren_start + 1..].trim_end_matches(')');
+            let symbol = trimmed[..paren_start].trim();
+            by_file
+                .entry(file.to_string())
+                .or_default()
+                .push(symbol.to_string());
+        } else {
+            out.push_str("  ");
+            out.push_str(trimmed);
+            out.push('\n');
+        }
+    }
+
+    for (file, symbols) in &by_file {
+        if symbols.len() == 1 {
+            out.push_str(&format!("  {} ({file})\n", symbols[0]));
+        } else {
+            out.push_str(&format!(
+                "  {file} ({}x): {}\n",
+                symbols.len(),
+                symbols.join(", ")
+            ));
+        }
+    }
+
+    out.push_str("\nFull list saved to .infigraph/sessions/analysis/. Use detail=true for source.");
+    out
+}
+
+fn compress_api_surface(raw: &str, _args: &Value) -> String {
+    // Format: "API Surface (N symbols):\n\n## file\n  [Kind] name (Lnn)\n..."
+    // Compress: collapse per-file to one-liner with count, keep routes
+    if !raw.starts_with("API Surface") {
+        return raw.to_string();
+    }
+
+    let mut lines = raw.lines();
+    let header = lines.next().unwrap();
+
+    let mut out = String::with_capacity(raw.len() / 2);
+    out.push_str(header);
+    out.push('\n');
+
+    let mut current_file = String::new();
+    let mut symbols: Vec<String> = Vec::new();
+    let mut routes: Vec<String> = Vec::new();
+
+    let flush = |out: &mut String, file: &str, symbols: &[String], routes: &[String]| {
+        if file.is_empty() {
+            return;
+        }
+        if routes.is_empty() {
+            out.push_str(&format!("  {file} ({} symbols)\n", symbols.len()));
+        } else {
+            out.push_str(&format!(
+                "  {file} ({} symbols, {} routes)\n",
+                symbols.len(),
+                routes.len()
+            ));
+            for r in routes {
+                out.push_str(&format!("    {r}\n"));
+            }
+        }
+    };
+
+    for line in lines {
+        if let Some(heading) = line.strip_prefix("## ") {
+            flush(&mut out, &current_file, &symbols, &routes);
+            current_file = heading.to_string();
+            symbols.clear();
+            routes.clear();
+            continue;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with("[Route]") {
+            routes.push(trimmed.to_string());
+        }
+        symbols.push(trimmed.to_string());
+    }
+    flush(&mut out, &current_file, &symbols, &routes);
+
+    out
+}
+
+fn compress_git_summary(raw: &str, _args: &Value) -> String {
+    // Format: "Git Summary — last N commits\n\n━━ hash date — author — message\n   Files changed: N\n     file\n   Symbols touched (N):\n     + Kind name (file:line)\n..."
+    // Compress: keep header + commit lines, collapse symbol lists >5 to count
+    if !raw.starts_with("Git Summary") {
+        return raw.to_string();
+    }
+
+    let mut out = String::with_capacity(raw.len() / 2);
+    let mut symbol_count = 0;
+    let mut in_symbols = false;
+    let max_symbols = 5;
+
+    for line in raw.lines() {
+        if line.starts_with("   Symbols touched") {
+            in_symbols = true;
+            symbol_count = 0;
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        if in_symbols {
+            if line.starts_with("     ") {
+                symbol_count += 1;
+                if symbol_count <= max_symbols {
+                    out.push_str(line);
+                    out.push('\n');
+                }
+                continue;
+            } else {
+                if symbol_count > max_symbols {
+                    out.push_str(&format!(
+                        "     ... and {} more symbols\n",
+                        symbol_count - max_symbols
+                    ));
+                }
+                in_symbols = false;
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+
+    if in_symbols && symbol_count > max_symbols {
+        out.push_str(&format!(
+            "     ... and {} more symbols\n",
+            symbol_count - max_symbols
+        ));
+    }
+
+    out
+}
+
+// --- Generic content compression (for `compress` MCP tool) ---
+
+#[derive(Debug, PartialEq)]
+pub enum ContentType {
+    Json,
+    JsonArray,
+    LogOutput,
+    StackTrace,
+    BuildOutput,
+    FileTree,
+    Table,
+    PlainText,
+}
+
+pub fn classify_content(text: &str) -> ContentType {
+    let first_lines: Vec<&str> = text.lines().take(20).collect();
+
+    // Check log/build/stack BEFORE JSON — log lines often start with [INFO] etc.
+    let log_markers = first_lines
+        .iter()
+        .filter(|l| {
+            let t = l.trim();
+            t.contains("[INFO]")
+                || t.contains("[WARN]")
+                || t.contains("[ERROR]")
+                || t.contains("[DEBUG]")
+                || t.contains("INFO ")
+                || t.contains("WARN ")
+                || t.contains("ERROR ")
+                || t.contains("DEBUG ")
+        })
+        .count();
+    if log_markers >= 2 {
+        return ContentType::LogOutput;
+    }
+
+    // Build output: "Compiling", "Checking", "Building", cargo/make patterns
+    let build_markers = first_lines
+        .iter()
+        .filter(|l| {
+            let t = l.trim();
+            t.starts_with("Compiling ")
+                || t.starts_with("Checking ")
+                || t.starts_with("Building ")
+                || t.starts_with("Linking ")
+                || t.starts_with("Finished ")
+                || t.starts_with("warning[")
+                || t.starts_with("error[")
+                || t.starts_with("warning:")
+                || t.starts_with("error:")
+        })
+        .count();
+    if build_markers >= 2 {
+        return ContentType::BuildOutput;
+    }
+
+    // Stack trace: "at " + file:line patterns, "Traceback", "panic", "Exception"
+    let stack_markers = first_lines
+        .iter()
+        .filter(|l| {
+            let t = l.trim();
+            t.starts_with("at ")
+                || t.contains("    at ")
+                || t.starts_with("Traceback")
+                || t.contains("panic")
+                || t.contains("Exception")
+                || t.contains("Error:")
+        })
+        .count();
+    if stack_markers >= 3 {
+        return ContentType::StackTrace;
+    }
+
+    // File tree: box-drawing chars
+    if first_lines
+        .iter()
+        .any(|l| l.contains("├──") || l.contains("└──"))
+    {
+        return ContentType::FileTree;
+    }
+
+    // Table: markdown table separators or tab-aligned columns
+    if first_lines
+        .iter()
+        .any(|l| l.contains("| --- |") || l.contains("|---|") || l.contains("| -- |"))
+    {
+        return ContentType::Table;
+    }
+
+    // JSON — check AFTER specific formats (log lines start with [)
+    let trimmed = text.trim_start();
+    if trimmed.starts_with('{') {
+        return ContentType::Json;
+    }
+    if trimmed.starts_with('[') {
+        return ContentType::JsonArray;
+    }
+
+    ContentType::PlainText
+}
+
+pub fn compress_generic(text: &str) -> String {
+    let content_type = classify_content(text);
+    match content_type {
+        ContentType::Json => compress_json(text),
+        ContentType::JsonArray => compress_json(text),
+        ContentType::LogOutput => compress_log(text),
+        ContentType::StackTrace => compress_stack_trace(text),
+        ContentType::BuildOutput => compress_build_output(text),
+        ContentType::FileTree => compress_file_tree(text),
+        ContentType::Table => compress_table(text),
+        ContentType::PlainText => text.to_string(),
+    }
+}
+
+fn compress_json(text: &str) -> String {
+    let parsed: Result<Value, _> = serde_json::from_str(text.trim());
+    let val = match parsed {
+        Ok(v) => v,
+        Err(_) => return text.to_string(),
+    };
+
+    match &val {
+        Value::Array(arr) if arr.len() > 3 => {
+            let schema = if let Some(first) = arr.first() {
+                infer_json_schema(first)
+            } else {
+                "unknown".to_string()
+            };
+            let mut out = format!("JSON array ({} items), schema: {}\n", arr.len(), schema);
+            out.push_str(&format!("Sample[0]: {}\n", truncate_json(&arr[0], 200)));
+            out.push_str(&format!(
+                "Sample[{}]: {}",
+                arr.len() - 1,
+                truncate_json(arr.last().unwrap(), 200)
+            ));
+            out
+        }
+        Value::Object(map) if text.len() > 500 => {
+            let mut out = format!("JSON object ({} keys): ", map.len());
+            let keys: Vec<&String> = map.keys().take(20).collect();
+            out.push_str(
+                &keys
+                    .iter()
+                    .map(|k| k.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+            if map.len() > 20 {
+                out.push_str(&format!(", ... ({} more)", map.len() - 20));
+            }
+            out.push('\n');
+            for (k, v) in map.iter().take(5) {
+                out.push_str(&format!("  {k}: {}\n", truncate_json(v, 100)));
+            }
+            if map.len() > 5 {
+                out.push_str(&format!("  ... ({} more keys)\n", map.len() - 5));
+            }
+            out
+        }
+        _ => text.to_string(),
+    }
+}
+
+fn infer_json_schema(val: &Value) -> String {
+    match val {
+        Value::Object(map) => {
+            let fields: Vec<String> = map
+                .iter()
+                .take(10)
+                .map(|(k, v)| {
+                    let t = match v {
+                        Value::Number(_) => "num",
+                        Value::String(_) => "str",
+                        Value::Bool(_) => "bool",
+                        Value::Array(_) => "array",
+                        Value::Object(_) => "obj",
+                        Value::Null => "null",
+                    };
+                    format!("{k}: {t}")
+                })
+                .collect();
+            format!("{{{}}}", fields.join(", "))
+        }
+        _ => "mixed".to_string(),
+    }
+}
+
+fn truncate_json(val: &Value, max_len: usize) -> String {
+    let s = serde_json::to_string(val).unwrap_or_default();
+    if s.len() <= max_len {
+        s
+    } else {
+        format!("{}...", &s[..max_len])
+    }
+}
+
+fn compress_log(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() < 10 {
+        return text.to_string();
+    }
+
+    let mut out = String::with_capacity(text.len() / 3);
+    let mut prev_pattern: Option<String> = None;
+    let mut dup_count = 0usize;
+
+    for line in &lines {
+        let trimmed = line.trim();
+        // Extract pattern: strip numbers, timestamps, IDs
+        let pattern = trimmed
+            .chars()
+            .map(|c| if c.is_ascii_digit() { '#' } else { c })
+            .collect::<String>();
+
+        let is_error = trimmed.contains("ERROR")
+            || trimmed.contains("WARN")
+            || trimmed.contains("error")
+            || trimmed.contains("warning");
+
+        if is_error {
+            if dup_count > 0 {
+                out.push_str(&format!("  ... ({dup_count} similar lines)\n"));
+                dup_count = 0;
+            }
+            prev_pattern = None;
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+
+        if prev_pattern.as_deref() == Some(&pattern) {
+            dup_count += 1;
+        } else {
+            if dup_count > 0 {
+                out.push_str(&format!("  ... ({dup_count} similar lines)\n"));
+            }
+            dup_count = 0;
+            prev_pattern = Some(pattern);
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if dup_count > 0 {
+        out.push_str(&format!("  ... ({dup_count} similar lines)\n"));
+    }
+    out
+}
+
+fn compress_stack_trace(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out = String::with_capacity(text.len() / 2);
+    let mut framework_count = 0;
+
+    for line in &lines {
+        let trimmed = line.trim();
+        let is_framework = trimmed.starts_with("at java.")
+            || trimmed.starts_with("at sun.")
+            || trimmed.starts_with("at org.springframework")
+            || trimmed.starts_with("at io.netty")
+            || trimmed.starts_with("at tokio::")
+            || trimmed.starts_with("at std::")
+            || trimmed.starts_with("at core::")
+            || trimmed.contains("<internal>")
+            || trimmed.contains("node_modules/")
+            || trimmed.contains("site-packages/");
+
+        if is_framework {
+            framework_count += 1;
+        } else {
+            if framework_count > 0 {
+                out.push_str(&format!("    ... ({framework_count} framework frames)\n"));
+                framework_count = 0;
+            }
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if framework_count > 0 {
+        out.push_str(&format!("    ... ({framework_count} framework frames)\n"));
+    }
+    out
+}
+
+fn compress_build_output(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out = String::with_capacity(text.len() / 3);
+    let mut compile_count = 0usize;
+
+    for line in &lines {
+        let trimmed = line.trim();
+        let is_compile_line = trimmed.starts_with("Compiling ")
+            || trimmed.starts_with("Checking ")
+            || trimmed.starts_with("Downloading ");
+
+        if is_compile_line {
+            compile_count += 1;
+            continue;
+        }
+
+        if compile_count > 0 {
+            out.push_str(&format!("({compile_count} compile/check steps)\n"));
+            compile_count = 0;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    if compile_count > 0 {
+        out.push_str(&format!("({compile_count} compile/check steps)\n"));
+    }
+    out
+}
+
+fn compress_file_tree(text: &str) -> String {
+    // Collapse deep subtrees: if a node has only leaf children, show "dir/ (N files)"
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() < 30 {
+        return text.to_string();
+    }
+
+    let mut out = String::with_capacity(text.len() / 2);
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        let depth = line.chars().take_while(|c| *c == ' ' || *c == '│').count();
+        let trimmed = line.trim_start_matches([' ', '│', '├', '└', '─']);
+        let trimmed = trimmed.trim();
+
+        if trimmed.ends_with('/') {
+            // Directory — count immediate children
+            let mut child_count = 0;
+            let mut j = i + 1;
+            while j < lines.len() {
+                let child_depth = lines[j]
+                    .chars()
+                    .take_while(|c| *c == ' ' || *c == '│')
+                    .count();
+                if child_depth <= depth {
+                    break;
+                }
+                if child_depth == depth + 2 || child_depth == depth + 4 {
+                    child_count += 1;
+                }
+                j += 1;
+            }
+            if child_count > 5 {
+                out.push_str(line);
+                out.push_str(&format!(" ({child_count} items)\n"));
+                i = j;
+                continue;
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+        i += 1;
+    }
+    out
+}
+
+fn compress_table(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() < 8 {
+        return text.to_string();
+    }
+
+    let mut out = String::with_capacity(text.len() / 3);
+    // Keep header (first 2-3 lines including separator), first 3 data rows, last row
+    let sep_idx = lines.iter().position(|l| l.contains("---")).unwrap_or(1);
+    let header_end = sep_idx + 1;
+
+    for line in lines.iter().take(header_end) {
+        out.push_str(line);
+        out.push('\n');
+    }
+
+    let data_lines: Vec<&&str> = lines[header_end..]
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    if data_lines.len() <= 4 {
+        for line in &data_lines {
+            out.push_str(line);
+            out.push('\n');
+        }
+    } else {
+        for line in data_lines.iter().take(3) {
+            out.push_str(line);
+            out.push('\n');
+        }
+        out.push_str(&format!("... ({} more rows)\n", data_lines.len() - 4));
+        out.push_str(data_lines.last().unwrap());
+        out.push('\n');
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -586,5 +1194,216 @@ Callees (3):
     fn test_compress_architecture_passthrough_on_bad_format() {
         let raw = "not architecture output";
         assert_eq!(compress_architecture(raw, &json!({})), raw);
+    }
+
+    #[test]
+    fn test_compress_list_files_collapses_dirs() {
+        let mut raw = String::new();
+        for i in 0..30 {
+            raw.push_str(&format!("src/auth/file{i}.rs\n"));
+        }
+        raw.push_str("src/routes/handler.rs\n");
+        raw.push_str("Cargo.toml\n");
+
+        let compressed = compress_list_files(&raw, &json!({}));
+
+        assert!(compressed.contains("32 files total:"));
+        assert!(compressed.contains("src/auth/ (30 files)"));
+        assert!(compressed.contains("src/routes/ (1 files)"));
+        assert!(compressed.contains("./ (1 files)"));
+        assert!(compressed.contains("glob pattern"));
+        // Individual files not listed
+        assert!(!compressed.contains("file15.rs"));
+    }
+
+    #[test]
+    fn test_compress_list_files_passthrough_small() {
+        let raw = "src/a.rs\nsrc/b.rs\n";
+        assert_eq!(compress_list_files(raw, &json!({})), raw);
+    }
+
+    #[test]
+    fn test_compress_list_files_passthrough_with_glob() {
+        let mut raw = String::new();
+        for i in 0..30 {
+            raw.push_str(&format!("src/file{i}.rs\n"));
+        }
+        let compressed = compress_list_files(&raw, &json!({"glob": "*.rs"}));
+        assert_eq!(compressed, raw);
+    }
+
+    #[test]
+    fn test_compress_dead_code_groups_by_file() {
+        let raw = "Saved to /tmp/dead.md\n(100 lines, 5000 bytes)\n\nPotentially dead code (4 symbols):\n  Function foo (src/a.rs)\n  Function bar (src/a.rs)\n  Function baz (src/b.rs)\n  Function qux (src/c.rs)\n";
+
+        let compressed = compress_dead_code(raw, &json!({}));
+
+        assert!(compressed.contains("Potentially dead code (4 symbols):"));
+        assert!(compressed.contains("src/a.rs (2x): Function foo, Function bar"));
+        assert!(compressed.contains("Function baz (src/b.rs)"));
+        assert!(compressed.contains("Function qux (src/c.rs)"));
+    }
+
+    #[test]
+    fn test_compress_api_surface_collapses_symbols_keeps_routes() {
+        let raw = "API Surface (8 symbols):\n\n## src/lib.rs\n  [Class] Foo (L1)\n  [Method] bar (L5)\n  [Method] baz (L10)\n## src/routes.rs\n  [Route] GET /users (L3) — route GET /users\n  [Route] POST /users (L8) — route POST /users\n";
+
+        let compressed = compress_api_surface(raw, &json!({}));
+
+        assert!(compressed.contains("API Surface (8 symbols):"));
+        assert!(compressed.contains("src/lib.rs (3 symbols)"));
+        assert!(!compressed.contains("[Class] Foo"));
+        assert!(compressed.contains("src/routes.rs (2 symbols, 2 routes)"));
+        assert!(compressed.contains("[Route] GET /users"));
+    }
+
+    #[test]
+    fn test_compress_git_summary_truncates_symbols() {
+        let mut raw = "Git Summary — last 1 commits\n\n━━ abc123 2026-07-10 — User — Big commit\n   Files changed: 1\n     src/lib.rs\n   Symbols touched (10):\n".to_string();
+        for i in 0..10 {
+            raw.push_str(&format!("     + Function fn{i} (src/lib.rs:{i})\n"));
+        }
+
+        let compressed = compress_git_summary(&raw, &json!({}));
+
+        assert!(compressed.contains("Symbols touched (10):"));
+        assert!(compressed.contains("Function fn0"));
+        assert!(compressed.contains("Function fn4"));
+        assert!(!compressed.contains("Function fn5"));
+        assert!(compressed.contains("... and 5 more symbols"));
+    }
+
+    #[test]
+    fn test_compress_git_summary_passthrough_small() {
+        let raw = "Git Summary — last 1 commits\n\n━━ abc 2026-07-10 — User — Fix\n   Files changed: 1\n     src/a.rs\n   Symbols touched (1):\n     + Function foo (src/a.rs:1)\n";
+        let compressed = compress_git_summary(raw, &json!({}));
+        assert!(compressed.contains("Function foo"));
+        assert!(!compressed.contains("... and"));
+    }
+
+    // --- Generic compressor tests ---
+
+    #[test]
+    fn test_classify_json_object() {
+        assert_eq!(classify_content(r#"{"key": "val"}"#), ContentType::Json);
+    }
+
+    #[test]
+    fn test_classify_json_array() {
+        assert_eq!(classify_content(r#"[1, 2, 3]"#), ContentType::JsonArray);
+    }
+
+    #[test]
+    fn test_classify_log_output() {
+        let log = "[INFO] Starting server\n[INFO] Listening on :8080\n[ERROR] Connection failed\n";
+        assert_eq!(classify_content(log), ContentType::LogOutput);
+    }
+
+    #[test]
+    fn test_classify_build_output() {
+        let build = "Compiling serde v1.0\nCompiling tokio v1.0\nChecking myapp v0.1\nerror[E0308]: type mismatch\n";
+        assert_eq!(classify_content(build), ContentType::BuildOutput);
+    }
+
+    #[test]
+    fn test_classify_stack_trace() {
+        let trace = "Error: NullPointerException\n    at com.app.Auth.login(Auth.java:45)\n    at java.lang.Thread.run(Thread.java:748)\n    at com.app.Main.main(Main.java:10)\n";
+        assert_eq!(classify_content(trace), ContentType::StackTrace);
+    }
+
+    #[test]
+    fn test_classify_file_tree() {
+        let tree = "src/\n├── auth/\n│   ├── login.rs\n│   └── logout.rs\n└── main.rs\n";
+        assert_eq!(classify_content(tree), ContentType::FileTree);
+    }
+
+    #[test]
+    fn test_classify_table() {
+        let table = "| Name | Age |\n| --- | --- |\n| Alice | 30 |\n| Bob | 25 |\n";
+        assert_eq!(classify_content(table), ContentType::Table);
+    }
+
+    #[test]
+    fn test_classify_plain_text() {
+        assert_eq!(classify_content("Hello world"), ContentType::PlainText);
+    }
+
+    #[test]
+    fn test_compress_json_array() {
+        let arr: Vec<serde_json::Value> = (0..50)
+            .map(|i| json!({"id": i, "name": format!("item{i}"), "active": true}))
+            .collect();
+        let text = serde_json::to_string_pretty(&arr).unwrap();
+
+        let compressed = compress_json(&text);
+
+        assert!(compressed.contains("JSON array (50 items)"));
+        assert!(compressed.contains("id: num"));
+        assert!(compressed.contains("name: str"));
+        assert!(compressed.contains("Sample[0]"));
+        assert!(compressed.contains("Sample[49]"));
+    }
+
+    #[test]
+    fn test_compress_log_dedup() {
+        let mut log = String::new();
+        for i in 0..20 {
+            log.push_str(&format!("[INFO] Processing item {i}/20\n"));
+        }
+        log.push_str("[ERROR] Failed on item 15\n");
+
+        let compressed = compress_log(&log);
+
+        assert!(compressed.contains("[INFO] Processing item 0/20"));
+        assert!(compressed.contains("similar lines"));
+        assert!(compressed.contains("[ERROR] Failed on item 15"));
+    }
+
+    #[test]
+    fn test_compress_build_output_collapses() {
+        let mut build = String::new();
+        for i in 0..20 {
+            build.push_str(&format!("Compiling crate{i} v1.0\n"));
+        }
+        build.push_str("warning: unused variable `x` (src/lib.rs:23)\n");
+        build.push_str("error[E0308]: type mismatch (src/main.rs:10)\n");
+        build.push_str("Finished dev profile\n");
+
+        let compressed = compress_build_output(&build);
+
+        assert!(compressed.contains("(20 compile/check steps)"));
+        assert!(compressed.contains("warning: unused variable"));
+        assert!(compressed.contains("error[E0308]"));
+        assert!(compressed.contains("Finished dev profile"));
+        assert!(!compressed.contains("Compiling crate5"));
+    }
+
+    #[test]
+    fn test_compress_stack_trace_collapses_framework() {
+        let trace = "Error: connection timeout\n    at com.app.Db.query(Db.java:45)\n    at java.lang.Thread.run(Thread.java:748)\n    at sun.reflect.Invoke(Invoke.java:20)\n    at com.app.Main.main(Main.java:10)\n";
+
+        let compressed = compress_stack_trace(trace);
+
+        assert!(compressed.contains("com.app.Db.query"));
+        assert!(compressed.contains("com.app.Main.main"));
+        assert!(compressed.contains("2 framework frames"));
+        assert!(!compressed.contains("java.lang.Thread"));
+    }
+
+    #[test]
+    fn test_compress_table_truncates() {
+        let mut table = "| Name | Score |\n| --- | --- |\n".to_string();
+        for i in 0..20 {
+            table.push_str(&format!("| user{i} | {i} |\n", i = i));
+        }
+
+        let compressed = compress_table(&table);
+
+        assert!(compressed.contains("| Name | Score |"));
+        assert!(compressed.contains("| user0 | 0 |"));
+        assert!(compressed.contains("| user2 | 2 |"));
+        assert!(compressed.contains("more rows"));
+        assert!(compressed.contains("| user19 | 19 |"));
+        assert!(!compressed.contains("| user10 |"));
     }
 }

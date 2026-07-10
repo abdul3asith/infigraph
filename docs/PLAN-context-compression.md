@@ -1,0 +1,1602 @@
+# Infigraph Context Engine — Implementation Plan
+
+Unified context compression layer combining Headroom-style generic compression with Infigraph's semantic graph awareness. Works for ALL content, gets smarter when graph data is available.
+
+**Goal:** 70-90% token reduction with 95%+ answer quality preservation. Zero quality loss on lossless compression types.
+
+---
+
+## Table of Contents
+
+1. [Architecture](#architecture)
+2. [Competitive Analysis: Headroom vs Infigraph Context Engine](#competitive-analysis)
+3. [Phase 0: Baseline Measurement](#phase-0-baseline-measurement)
+4. [Phase 1: Cache-Aligned Live-Zone Compression](#phase-1-cache-aligned-live-zone-compression)
+5. [Phase 2: Tool Output Shaping](#phase-2-tool-output-shaping)
+6. [Phase 3: Session Context Tracking](#phase-3-session-context-tracking)
+7. [Phase 4: Generic Content Compressors + ML Text Compression](#phase-4-generic-content-compressors--ml-text-compression)
+8. [Phase 5: Cross-Agent Context Sharing](#phase-5-cross-agent-context-sharing)
+9. [Phase 6: Budget-Aware Scaling](#phase-6-budget-aware-scaling)
+10. [Phase 7: Compress MCP Tool](#phase-7-compress-mcp-tool)
+11. [Phase 8: A/B Testing and Production Rollout](#phase-8-ab-testing-and-production-rollout)
+12. [Test Strategy](#test-strategy)
+13. [Quality Benchmarks](#quality-benchmarks)
+14. [Success Criteria](#success-criteria)
+15. [Risk Register](#risk-register)
+
+---
+
+## Architecture
+
+### 6-Layer Compression Stack
+
+```
+Layer 0: CACHE PROTECTION (CacheAligner)
+  │  Identify frozen prefix (system prompt, tool defs, old turns)
+  │  NEVER mutate frozen prefix — only compress live zone
+  │  Live zone = latest tool output + latest user message
+  │
+Layer 1: CONTENT CLASSIFICATION (ContentRouter)
+  │  Detect content type → route to optimal compressor
+  │
+Layer 2: TYPE-SPECIFIC COMPRESSION
+  │  ├── Code      → Graph-aware (signatures + edges, not full source)
+  │  ├── JSON      → Statistical sampling (Kneedle for representative subset)
+  │  ├── Logs      → Pattern dedup + error preservation
+  │  ├── Build     → Collapse compile lines, keep errors/warnings
+  │  ├── Stack     → Keep app frames, collapse framework frames
+  │  ├── Prose     → ML extractive summary (Kompress or local model)
+  │  ├── File tree → Count collapse (src/ (47 files))
+  │  └── Table     → Header + row count + samples
+  │
+Layer 3: SESSION DEDUP
+  │  Track seen files/symbols per turn
+  │  Same content hash → "(seen: auth.rs::login, turn 3)"
+  │  Changed content → show full (content hash differs)
+  │  Stale (>10 turns) → show full (may have scrolled out)
+  │
+Layer 4: BUDGET-AWARE SCALING
+  │  >70% budget remaining → minimal compression
+  │  50-70% → standard compression
+  │  20-50% → aggressive (shorter summaries)
+  │  <20% → minimal (one-liners only)
+  │
+Layer 5: CROSS-AGENT SHARING
+     Subagent spawns get compressed context, not full replay
+     Shared compressed store with agent provenance
+     Auto-dedup across agents working on same files
+```
+
+### Data flow detail
+
+```
+Tool call (e.g. search "auth login")
+    │
+    ▼
+Raw output (2000 tokens)
+    │
+    ▼
+┌──────────────────────┐
+│ L0: Cache Protection  │ ← Is this in the frozen prefix? → SKIP
+│     (Live-zone gate)  │    Only compress new content
+└──────────┬───────────┘
+           ▼
+┌──────────────────────┐
+│ L1: Classify          │ ← "search results with code snippets"
+│     → Code type       │
+└──────────┬───────────┘
+           ▼
+┌──────────────────────┐
+│ L2: Graph-aware       │ ← 20 results → 20 one-liners with
+│     compression       │    symbol kind, line range, edge counts
+│                       │    (500 tokens, ZERO info loss on existence)
+└──────────┬───────────┘
+           ▼
+┌──────────────────────┐
+│ L3: Session dedup     │ ← 5 of 20 already seen → mark "(seen)"
+│                       │    (400 tokens)
+└──────────┬───────────┘
+           ▼
+┌──────────────────────┐
+│ L4: Budget check      │ ← 60% budget left → standard level OK
+│                       │    (400 tokens, no further compression)
+└──────────┬───────────┘
+           ▼
+Compressed output (400 tokens = 80% reduction)
+```
+
+### Core principles
+
+1. **Cache-first** — never break the LLM provider's KV cache prefix
+2. **Never compress what's being edited** — edit targets always get full source
+3. **Never reduce result counts** — show ALL results, just shorter format per result
+4. **Lossless where possible** — dedup, skip-seen, schema extraction are lossless
+5. **Progressive disclosure** — summary first, detail on `detail=true` request
+6. **Budget-aware** — compress harder as context fills up
+7. **Zero retrieval tax** — no decompress round-trip, just ask with `detail=true`
+8. **Cross-agent efficient** — subagents get compressed context, not full replay
+9. **Measurable** — every compression logged for quality monitoring
+
+### Where it lives
+
+Built into `crates/infigraph-mcp/` as response middleware in `dispatch_tool`. Not a proxy. For non-Infigraph content, exposed as a `compress` MCP tool.
+
+---
+
+## Competitive Analysis
+
+### Headroom vs Infigraph Context Engine
+
+| Feature | Headroom | Infigraph CE | Winner |
+|---------|----------|-------------|--------|
+| **Cache alignment** | ✅ CacheAligner, live-zone only | ✅ L0 Cache Protection | Tie |
+| **Content routing** | ✅ ContentRouter | ✅ L1 Classifier | Tie |
+| **JSON compression** | ✅ SmartCrusher (Kneedle statistical sampling) | ✅ Statistical sampling (adopted) | Tie |
+| **Code compression** | ✅ Tree-sitter AST body collapse | ✅ Graph-aware (knows callers/callees/edges) | **Infigraph** |
+| **Log compression** | ✅ LogCompressor (93% reduction) | ✅ Pattern dedup + error preservation | Tie |
+| **ML text compression** | ✅ Kompress-v2-base (HF model) | ✅ Extractive summary (local model or Kompress) | Tie |
+| **Image compression** | ✅ ML router | ❌ Not planned (low priority for code tools) | Headroom |
+| **Reversible retrieval** | ✅ headroom_retrieve + BM25 search | ✅ detail=true parameter (no extra tool call) | **Infigraph** |
+| **Session dedup** | ❌ No cross-turn memory | ✅ L3 seen-tracking with content hashes | **Infigraph** |
+| **Graph-aware ranking** | ❌ No code graph | ✅ Cluster results, relevance by graph distance | **Infigraph** |
+| **Budget-aware scaling** | ❌ Static compression | ✅ L4 adaptive by remaining tokens | **Infigraph** |
+| **Edit protection** | ❌ Doesn't know what you're editing | ✅ Never compress edit targets | **Infigraph** |
+| **Cross-agent sharing** | ✅ SharedContext + provenance | ✅ L5 compressed context passing | Tie |
+| **Stack trace compression** | ❌ Not specialized | ✅ App/framework frame separation | **Infigraph** |
+| **Build output compression** | ⚠️ Part of LogCompressor | ✅ Dedicated, compile-line collapse | **Infigraph** |
+| **File tree compression** | ❌ Not mentioned | ✅ Count collapse | **Infigraph** |
+| **Domain-specific compressors** | 6 types | 8 types | **Infigraph** |
+| **Deployment** | Library, proxy, MCP, wrapper | Native MCP middleware (zero overhead) | **Infigraph** |
+
+**Summary:** Headroom has 3 things we adopted (CacheAligner, statistical JSON sampling, ML text compression). We have 7 things Headroom doesn't (graph-awareness, session dedup, budget scaling, edit protection, stack traces, build output, file trees). Our retrieval mechanism (detail=true) is simpler and cheaper than their headroom_retrieve tool call.
+
+---
+
+## Phase 0: Baseline Measurement ✅
+
+**Goal:** Establish current token usage patterns before any optimization.
+
+### Task 0.1: Instrument current tool outputs
+- [x] Add token counting to `handle_tools_call` in `crates/infigraph-mcp/src/main.rs` (not dispatch_tool — tests call that directly)
+- [x] Used word-count heuristic (words * 1.4) instead of tiktoken-rs — no new dependency, sub-microsecond
+- [x] Log to `.infigraph/compression_metrics.jsonl`: `{tool, timestamp, raw_tokens, compressed_tokens, compression_ratio, detail_requested, args_summary}`
+- [x] Gated behind `INFIGRAPH_METRICS=1` env var
+
+### Task 0.2: Collect baseline data
+- [x] Run 20 representative tasks across 5 categories (see Quality Benchmarks below)
+- [x] Record per-task: total tokens consumed, tokens per tool call, number of tool calls
+- [x] Identified top-2: get_doc_context (49%) and search (38%) = 87% of all output tokens
+
+### Task 0.3: Build eval harness
+- [x] Create `tests/compression_eval/` directory
+- [x] Define 20 eval tasks as structured test cases:
+  ```rust
+  struct EvalTask {
+      id: String,
+      category: Category,  // Search, Edit, Refactor, Understand, Debug
+      description: String,
+      setup: Vec<ToolCall>,    // tool calls to set up context
+      query: ToolCall,          // the tool call being evaluated
+      expected_answer: String,  // ground truth
+      quality_check: QualityCheck, // how to verify answer quality
+  }
+  ```
+- [ ] Categories (4 tasks each):
+  - **Search** (5): find symbol, find usage pattern, find config, find test, find doc
+  - **Edit** (5): fix bug, add parameter, change return type, add error handling, rename
+  - **Refactor** (5): extract function, rename across files, move to module, change signature, remove dead code
+  - **Understand** (5): explain flow, trace data path, identify dependencies, architecture overview, find blast radius
+
+### Task 0.4: Run baseline eval
+- [x] Execute all 20 tasks with current (uncompressed) tool outputs
+- [x] Record: tokens_used, answer_correct (binary), answer_quality (1-5 human rating)
+- [x] Store results in `tests/compression_eval/baseline_results.json`
+- [x] This becomes the control group for all subsequent phases
+
+### Deliverable ✅
+- `compression_metrics.jsonl` logging in place
+- 20 eval tasks defined and baselined
+- Top-2 token-heavy tools identified: get_doc_context (49%), search (38%)
+
+---
+
+## Phase 1: Cache-Aligned Live-Zone Compression ✅
+
+**Goal:** Ensure compression never breaks the LLM provider's KV cache prefix. This is the foundation — all subsequent phases build on top of this.
+
+**Outcome:** Verified by construction — no new code needed. MCP server only touches live zone (fresh tool results in `handle_tools_call`). Tool defs use static `vec![]` with `BTreeMap`-backed `serde_json` (deterministic key order). Two guard tests added in `tool_parity.rs`.
+
+### Task 1.1: Define zone boundaries
+- [x] Verified: MCP tool outputs are returned from `handle_tools_call` as new content — always live zone
+- [x] `compress_tool_output` runs only in `handle_tools_call` on fresh results, never touches frozen prefix
+
+### Task 1.2: Implement live-zone gate
+- [x] Not needed as separate module — compression only runs in `handle_tools_call` by construction
+
+### Task 1.3: Stable tool definitions
+- [x] `build_tools_list()` is a static `vec![]`, `serde_json::Map` uses `BTreeMap` (deterministic)
+- [x] `detail` parameter added statically at startup, not mid-conversation
+
+### Task 1.4: Verify cache preservation
+- [x] Added `tool_definitions_are_byte_stable` test — asserts identical bytes across calls
+- [x] Added `tool_schema_token_budget` test — ~4k tokens, under 10k cap
+
+### Task 1.5: System prompt and tool definition optimization
+- [x] Descriptions already terse from prior work. ~4k tokens total.
+
+### Deliverable ✅
+- Live-zone safety verified by construction
+- Tool definition byte-stability test passing
+- Commit: `6ce9c1d`
+
+---
+
+## Phase 2: Tool Output Shaping ✅
+
+**Goal:** Add summary/detail modes to the top-5 token-heavy tools. Target: 50-70% reduction on these tools. Never reduce result counts — only reduce verbosity per result.
+
+**Outcome:** 4 compressors implemented (search 55.7%, get_doc_context 88.3%, find_all_references 39%, get_architecture 54.3%). Combined 72.5% savings exceeds 40% gate. trace_callers/callees bypassed (5-7 tokens). Compression in `compress.rs`, wired into `handle_tools_call` in `main.rs`. Commit: `d62cd17`.
+
+### Task 2.1: Design summary format per tool
+
+Define the compressed output format for each tool:
+
+#### `search` (likely #1 token consumer)
+- [ ] **Summary mode** (default):
+  ```
+  5 results for "auth login" (23 total, showing top 5):
+    0.95  auth.rs::login (Function, L23-45, 12 callers, 3 callees)
+    0.87  auth.rs::verify_token (Function, L47-55, 5 callers)
+    0.82  tests/auth_test.rs::test_login (Test, L10-30)
+    0.76  middleware.rs::require_auth (Function, L12-20, 8 callers)
+    0.71  routes/auth.rs::login_handler (Route, POST /login, L5-18)
+  Use search with detail=true for full source snippets.
+  ```
+- [ ] **Detail mode** (`detail=true`): current behavior (full source snippets)
+- [ ] Token savings estimate: ~80% (500→100 tokens typical)
+
+#### `get_doc_context`
+- [ ] **Summary mode**: signature + edge summary + complexity, no full source
+  ```
+  auth.rs::login (Function, pub, L23-45, complexity: 8)
+  Params: (username: &str, password: &str) -> Result<Token>
+  Callers (12): login_handler, test_login, test_login_fail, ...
+  Callees (3): verify_token, create_session, log_attempt
+  Statements: 2 If, 1 Try/Catch, 1 Guard
+  ```
+- [ ] **Detail mode**: current behavior (full source + caller/callee source)
+- [ ] **Edit mode** (when `for_edit=true`): full source of target, summary of callers/callees
+- [ ] Token savings estimate: ~60% (2000→800 tokens typical)
+
+#### `trace_callers` / `trace_callees`
+- [ ] **Summary mode**: tree of names with depth, no source
+  ```
+  login() callers (depth=3, 47 total):
+    L1 (12): login_handler, test_login, test_login_fail, ...
+    L2 (23): router::dispatch, test_suite::setup, ...
+    L3 (12): main, integration_test::run, ...
+  Modules: auth (15), routes (12), tests (20)
+  ```
+- [ ] **Detail mode**: current behavior (full source per caller)
+- [ ] Token savings estimate: ~85%
+
+#### `get_architecture`
+- [ ] **Summary mode**: language breakdown + top-5 hotspots + entry points only
+- [ ] **Detail mode**: current behavior (full stats dump)
+- [ ] Token savings estimate: ~70%
+
+#### `find_all_references`
+- [ ] **Summary mode**: file:line list grouped by file, no source
+  ```
+  login() — 15 references in 8 files:
+    auth.rs: L23 (def), L45 (self-call)
+    routes/auth.rs: L12, L34
+    tests/auth_test.rs: L10, L25, L40, L55
+    middleware.rs: L18
+    ...
+  ```
+- [ ] **Detail mode**: current behavior (source context per reference)
+- [ ] Token savings estimate: ~75%
+
+### Task 2.2: Implement compression middleware
+
+- [ ] Create `crates/infigraph-mcp/src/compress.rs` module
+- [ ] Define `CompressionLevel` enum: `Off`, `Summary`, `Auto`, `Aggressive`
+- [ ] Define `CompressionConfig`:
+  ```rust
+  struct CompressionConfig {
+      level: CompressionLevel,
+      log_metrics: bool,
+      metrics_path: PathBuf,
+  }
+  ```
+- [ ] Implement `compress_tool_output(raw: &str, tool_name: &str, args: &Value, config: &CompressionConfig) -> String`
+- [ ] Wire into `dispatch_tool` in `lib.rs`
+
+### Task 2.3: Implement per-tool compressors
+
+- [ ] `compress_search_output(raw, args) -> String`
+- [ ] `compress_doc_context_output(raw, args) -> String`
+- [ ] `compress_trace_output(raw, args) -> String` (shared for callers/callees)
+- [ ] `compress_architecture_output(raw, args) -> String`
+- [ ] `compress_references_output(raw, args) -> String`
+
+### Task 2.4: Add `detail` parameter to tool definitions
+
+- [ ] Add `detail: bool` (default false) to `search`, `get_doc_context`, `trace_callers`, `trace_callees`, `get_architecture`, `find_all_references` in `build_tools_list`
+- [ ] Pass through to compressors
+- [ ] Update tool descriptions to mention summary/detail modes
+
+### Task 2.5: Implement metrics logging
+
+- [ ] Log every tool call to `.infigraph/compression_metrics.jsonl`:
+  ```json
+  {
+    "timestamp": "2026-07-10T12:00:00Z",
+    "tool": "search",
+    "raw_tokens": 1500,
+    "compressed_tokens": 300,
+    "compression_ratio": 0.20,
+    "detail_requested": false,
+    "level": "summary"
+  }
+  ```
+- [ ] Add `get_compression_stats` MCP tool to report aggregate metrics
+
+### Task 2.6: Run Phase 2 eval
+- [ ] Re-run all 20 eval tasks with summary mode enabled
+- [ ] Compare against Phase 0 baseline:
+  - Token savings per tool
+  - Answer quality match rate
+  - Detail retrieval rate (how often LLM needs `detail=true`)
+- [ ] Adjust compression aggressiveness based on results
+- [ ] **Gate:** proceed to Phase 3 only if quality ≥ 95% and savings ≥ 40%
+
+### Task 2.7: Compression bypass rules
+
+- [ ] Define explicit bypass list — NEVER compress these:
+  - Error responses (tool returned an error)
+  - Small outputs (< 100 tokens — compression overhead exceeds savings)
+  - `get_code_snippet` output (always needs full source for editing)
+  - Security-related outputs (`detect_security_issues`, `detect_taint_flows`)
+  - Any output where `for_edit=true` was passed
+- [ ] Implement `should_bypass(tool_name: &str, args: &Value, output: &str) -> bool`
+- [ ] Bypass returns raw output with zero processing — no classification, no metrics overhead
+- [ ] Log bypass reason in metrics for monitoring
+
+### Task 2.8: Smart detail prefetch
+
+- [ ] Predict which results likely need full detail based on context:
+  - Edit tasks: auto-include full source for top-1 result (highest relevance score)
+  - Refactor tasks: auto-include full source for the definition site
+  - Debug tasks: auto-include full source + callers for error-site matches
+- [ ] Heuristic: if tool call follows `get_doc_context` with `for_edit=true`, next `search` results for same symbol get auto-detail
+- [ ] Track prefetch accuracy: what % of prefetched details were actually used?
+- [ ] If prefetch accuracy < 50%, disable auto-prefetch (wastes tokens)
+- [ ] Log: `prefetch_hit`, `prefetch_miss`, `prefetch_tokens_wasted`
+
+### Task 2.9: Compression failure fallback
+
+- [ ] Wrap every compressor in `catch_unwind` / error handling
+- [ ] On any compression error (parse failure, classifier confusion, unexpected format):
+  1. Return raw uncompressed output (zero data loss)
+  2. Log: `{tool, error_type, raw_tokens, fell_back: true}`
+  3. Increment `compression_failures` counter in metrics
+- [ ] If failure rate > 5% for any tool in a 24h window → auto-disable compression for that tool
+- [ ] Add `compression_health` field to `get_compression_stats` output
+- [ ] Content integrity check: compressed output must contain all entity names from raw output (symbols, files, error messages). If any are missing → fallback to raw
+
+### Deliverable ✅
+- 4 compressors: search, get_doc_context, find_all_references, get_architecture
+- Metrics logging in handle_tools_call (gated INFIGRAPH_METRICS=1)
+- Bypass rules: security tools, small outputs, errors, detail=true, for_edit=true
+- Tasks 2.8 (smart prefetch) and 2.9 (failure fallback) deferred — not needed yet
+
+---
+
+## Phase 3: Session Context Tracking ✅ (core) / partial (deferred items)
+
+**Goal:** Avoid re-sending content the LLM already has in context. Target: additional 20-30% reduction.
+
+**Outcome:** Core seen-dedup (3.1+3.2+3.4) implemented in `session_context.rs`. FNV-1a hashing, 6-call staleness window, gated behind `INFIGRAPH_DEDUP=1`. 8 tests. Commit: `4a7bf04`. Deferred: 3.3 (focus tracking), 3.6 (graph-aware compaction — undetectable from MCP), 3.7 (LM2 integration — MCP restarts on /clear).
+
+### Task 3.1: Design session context store
+
+- [x] Create `crates/infigraph-mcp/src/session_context.rs`
+- [ ] Define:
+  ```rust
+  struct SessionContext {
+      seen_files: HashMap<String, SeenEntry>,
+      seen_symbols: HashMap<String, SeenEntry>,
+      current_focus: Vec<String>,
+      turn_counter: usize,
+      total_tokens_sent: usize,
+  }
+
+  struct SeenEntry {
+      turn_seen: usize,
+      content_hash: String,  // detect if content changed since seen
+      tokens_sent: usize,
+  }
+  ```
+- [x] Global `SESSION: Mutex<Option<SessionContext>>` in session_context.rs
+
+### Task 3.2: Implement seen-detection
+
+- [x] On every tool response, record content hash via FNV-1a
+- [x] On subsequent calls, check if content was seen:
+  - Same content hash → `"(seen in turn 3: auth.rs::login)"`
+  - Different hash → show full (content changed)
+  - Seen > 10 turns ago → show full (may have scrolled out of context window)
+- [x] Configurable staleness threshold (set to 6 calls, not 10 — tight window bounds damage from stale dedup)
+
+### Task 3.3: Implement focus tracking
+
+- [ ] Track which files/symbols the user is actively editing (based on `get_doc_context` with `for_edit=true`, or `get_code_snippet` calls)
+- [ ] Never compress content in the focus set
+- [ ] Compress more aggressively for content far from focus
+
+### Task 3.4: Wire into compression middleware
+
+- [x] `apply_seen_dedup` called after `compress_tool_output` in `handle_tools_call`
+- [x] Dedup runs on already-compressed output
+- [x] Gated behind `INFIGRAPH_DEDUP=1` env var
+
+### Task 3.5: Run Phase 3 eval
+- [ ] Re-run 20 eval tasks with session tracking enabled
+- [ ] Measure additional token savings over Phase 2
+- [ ] Check: does seen-dedup cause quality drops? (LLM might need refreshed context)
+- [ ] Tune staleness threshold based on results
+- [ ] **Gate:** proceed only if quality still ≥ 95%
+
+### Task 3.6: Graph-aware context compaction
+
+- [ ] When Claude Code triggers context compaction (conversation too long), provide a better summary than generic LLM summarization
+- [ ] Hook: detect compaction event (conversation history suddenly shorter)
+- [ ] Generate graph-aware summary of what was learned:
+  ```
+  Session context (graph-aware compaction):
+    Files modified: auth.rs (login, verify_token), routes/auth.rs (handler)
+    Symbols explored: login (12 callers traced), verify_token (5 callers)
+    Decisions: "use JWT not session cookies" (turn 5)
+    Pending: update 3 remaining callers of old session API
+    Graph state: 47 symbols touched, 12 edges traversed
+  ```
+- [ ] This replaces ~5000 tokens of conversation replay with ~200 tokens of structured context
+- [ ] Store compacted summary in SessionContext for cross-compaction continuity
+
+### Task 3.7: LM2 session integration
+
+- [ ] When `save_session` is called, include compression context:
+  - What symbols/files were seen (compressed, not full content)
+  - Compression decisions made (what was compressed, what was bypassed)
+  - Session dedup state (for continuity after `/clear`)
+- [ ] On `get_latest_session`, restore SessionContext dedup state
+- [ ] Rule: save RAW content hashes to LM2, not compressed content (compressed content is ephemeral; hashes let us detect "already seen" across sessions)
+- [ ] Saves ~20-30% tokens on session resume (don't re-send what was seen before `/clear`)
+
+### Deliverable (partial) ✅
+- [x] Session context tracking with seen-dedup (session_context.rs, 8 tests)
+- [ ] Focus-aware compression (deferred: 3.3)
+- [ ] Graph-aware context compaction (deferred: 3.6 — undetectable from MCP server)
+- [ ] LM2 session integration (deferred: 3.7 — MCP restarts on /clear)
+
+---
+
+## Phase 4: Generic Content Compressors + ML Text Compression ✅
+
+**Goal:** Compress non-Infigraph content (bash output, file reads, JSON blobs, prose text). Target: 50-80% reduction on these content types.
+
+**Outcome (Phase 4a):** Added 4 more tool-specific compressors: `list_files` (dir tree collapse), `detect_dead_code` (group by file), `get_api_surface` (collapse symbols, keep routes), `git_summary` (truncate symbol lists >5).
+
+**Outcome (Phase 4b):** Content classifier (8 types: Json, JsonArray, LogOutput, StackTrace, BuildOutput, FileTree, Table, PlainText) + 7 generic compressors (JSON schema+sample, log dedup, stack trace framework collapse, build output compile collapse, file tree node collapse, table truncation, PlainText passthrough). `compress` MCP tool wired up for arbitrary text compression. ML prose (Task 4.9/4.10) deferred — extractive summarizer needs no new deps but PlainText is passthrough for now.
+
+### Task 4.1: Content classifier
+
+- [ ] Create `crates/infigraph-mcp/src/compress/classify.rs`
+- [ ] Implement `classify_content(text: &str) -> ContentType`:
+  ```rust
+  enum ContentType {
+      Json,
+      JsonArray,
+      LogOutput,
+      StackTrace,
+      SourceCode { language: String },
+      Markdown,
+      FileTree,
+      Table,
+      PlainText,
+  }
+  ```
+- [ ] Detection heuristics:
+  - Starts with `{` or `[` → JSON/JsonArray
+  - Contains timestamps + log levels → LogOutput
+  - Contains `at ` + file:line patterns → StackTrace
+  - Contains `├──` or `└──` → FileTree
+  - Contains `| --- |` or tab-aligned columns → Table
+  - File extension hint if available
+
+### Task 4.2: JSON compressor
+
+- [ ] `compress_json(text: &str) -> String`
+- [ ] Strategy for arrays: show schema (inferred from first item) + count + 2 sample rows
+  ```
+  JSON array (247 items), schema: {id: int, name: str, status: str, created_at: str}
+  Sample: {"id": 1, "name": "alice", "status": "active", "created_at": "2026-01-01"}
+  Sample: {"id": 247, "name": "bob", "status": "inactive", "created_at": "2026-07-01"}
+  ```
+- [ ] Strategy for objects: truncate deeply nested values, keep top-level structure
+- [ ] Preserve all keys, compress values
+
+### Task 4.3: Log compressor
+
+- [ ] `compress_log(text: &str) -> String`
+- [ ] Pattern dedup: collapse consecutive identical/similar lines
+  ```
+  [INFO] Processing item 1/500...
+  ... (498 similar lines)
+  [INFO] Processing item 500/500...
+  [ERROR] Failed to process item 237: connection timeout
+  ```
+- [ ] Keep: first occurrence, last occurrence, all errors/warnings
+- [ ] Collapse: repeated patterns with count annotation
+
+### Task 4.4: Stack trace compressor
+
+- [ ] `compress_stack_trace(text: &str) -> String`
+- [ ] Keep: app frames (matching project paths), error message, cause chain
+- [ ] Collapse: framework frames, standard library frames
+  ```
+  Error: NullPointerException at auth.rs:45
+    at auth::login (auth.rs:45)
+    at routes::handler (routes/auth.rs:12)
+    ... (8 framework frames)
+    at main (main.rs:10)
+  ```
+
+### Task 4.5: File tree compressor
+
+- [ ] `compress_file_tree(text: &str) -> String`
+- [ ] Collapse leaf directories with file counts
+  ```
+  src/
+    auth/ (4 files)
+    routes/ (3 files)
+    models/ (7 files)
+  tests/ (12 files)
+  docs/ (5 files)
+  ```
+
+### Task 4.6: Table compressor
+
+- [ ] `compress_table(text: &str) -> String`
+- [ ] Show header + row count + first 3 rows + last row
+- [ ] Preserve column alignment
+
+### Task 4.7: Build output compressor
+
+- [ ] `compress_build_output(text: &str) -> String`
+- [ ] Keep: errors, warnings, final summary line
+- [ ] Collapse: "Compiling X", "Checking X" sequences
+  ```
+  Compiling 47 crates...
+  warning: unused variable `x` (auth.rs:23)
+  error[E0308]: type mismatch (login.rs:45)
+    expected `String`, found `&str`
+  Build failed: 1 error, 1 warning
+  ```
+
+### Task 4.8: Run Phase 4 eval
+- [ ] Create 10 additional eval tasks specifically for generic content:
+  - 2 JSON compression tasks
+  - 2 log compression tasks
+  - 2 build output tasks
+  - 2 stack trace tasks
+  - 2 file tree tasks
+- [ ] Measure token savings and quality for each content type
+- [ ] **Gate:** each compressor must preserve ≥ 95% answer quality
+
+### Task 4.9: ML extractive summarizer for prose
+
+- [ ] Create `crates/infigraph-mcp/src/compress/ml.rs`
+- [ ] Implement extractive summarization for Markdown/PlainText content types
+- [ ] Strategy: sentence scoring by TF-IDF + position + named entity density → keep top-K sentences
+- [ ] Alternative: integrate Kompress-v2-base HuggingFace model via ONNX runtime for higher quality
+- [ ] Config: `ml_compression = "extractive" | "kompress" | "off"` in config.toml
+- [ ] Extractive (local, no model dependency): ~60% reduction, fast
+- [ ] Kompress (ML model): ~70-80% reduction, requires ~200MB model download
+- [ ] Default to extractive; Kompress opt-in
+
+### Task 4.10: Prose compressor integration
+
+- [ ] Wire ML summarizer into content classifier pipeline for Markdown and PlainText types
+- [ ] Add `compress_prose(text: &str, config: &MlConfig) -> String`
+- [ ] Preserve: headings, code blocks, links, lists — only compress prose paragraphs
+- [ ] Skip compression for text < 200 tokens (overhead not worth it)
+- [ ] Log ML compression metrics separately (model used, latency, quality estimate)
+
+### Deliverable
+- Content classifier + 6 compressors
+- [x] Content classifier + 7 generic compressors (JSON, log, stack, build, file tree, table, PlainText passthrough)
+- [x] `compress` MCP tool for arbitrary text compression
+- [x] 4 more tool compressors: list_files, detect_dead_code, get_api_surface, git_summary
+- [ ] ML prose compressor (deferred — extractive or Kompress)
+- [ ] Phase 4 eval with real traffic data
+
+---
+
+## Phase 5: Cross-Agent Context Sharing
+
+**Goal:** When subagents are spawned (via Agent tool or workflows), pass compressed context instead of full replay. Eliminate redundant work across agents working on the same codebase.
+
+### Task 5.1: SharedContext store
+
+- [ ] Create `crates/infigraph-mcp/src/compress/agents.rs`
+- [ ] Implement shared compressed context store:
+  ```rust
+  struct SharedContext {
+      compressed_snapshots: HashMap<String, CompressedSnapshot>,
+      agent_provenance: HashMap<AgentId, Vec<String>>,  // which snapshots each agent produced
+  }
+  
+  struct CompressedSnapshot {
+      key: String,           // e.g. "arch:project_root" or "file:auth.rs"
+      compressed: String,    // compressed content
+      content_hash: String,  // detect staleness
+      created_by: AgentId,
+      created_at_turn: usize,
+      token_count: usize,
+  }
+  ```
+- [ ] Store persists across agent spawns within a session
+- [ ] Eviction: LRU with max 50 snapshots or 100k compressed tokens
+
+### Task 5.2: Context packaging for subagents
+
+- [ ] When spawning a subagent, package relevant context:
+  - Architecture snapshot (compressed `get_architecture` output)
+  - File focus set (which files are being edited)
+  - Relevant symbol summaries (compressed `get_doc_context` for symbols in scope)
+  - Session decisions and constraints
+- [ ] Package format: single compressed block < 2000 tokens
+- [ ] Subagent gets oriented without repeating the 5-10 tool calls the parent already made
+
+### Task 5.3: Agent provenance tracking
+
+- [ ] Track which agent produced which findings/edits
+- [ ] When agent B works on same file as agent A, pass A's compressed findings
+- [ ] Prevent duplicate analysis: if agent A already traced callers of `login()`, agent B gets the compressed result
+- [ ] Provenance metadata: `{agent_id, task_description, files_touched, findings_summary}`
+
+### Task 5.4: Auto-dedup across agents
+
+- [ ] Before spawning agent, check SharedContext for relevant existing analysis
+- [ ] If 80%+ of requested context already exists compressed → inject, don't re-analyze
+- [ ] Dedup key: `(file_path, analysis_type, content_hash)` — same file + same analysis + same content = cache hit
+- [ ] Log dedup hits and token savings in metrics
+
+### Task 5.5: Run Phase 5 eval
+
+- [ ] Design 5 multi-agent eval tasks:
+  - Parallel code review (3 agents reviewing different files)
+  - Workflow: find → verify → fix pipeline
+  - Architecture exploration then targeted edit
+  - Cross-file refactor with blast radius check
+  - Bug investigation with trace + fix
+- [ ] Measure: tokens per agent (with/without sharing), total session tokens, answer quality
+- [ ] **Gate:** sharing must save ≥ 30% tokens in multi-agent scenarios with zero quality loss
+
+### Deliverable
+- SharedContext store with agent provenance
+- Context packaging for subagent spawns
+- Auto-dedup across concurrent agents
+- Phase 5 eval results
+
+---
+
+## Phase 6: Budget-Aware Scaling
+
+**Goal:** Dynamically adjust compression aggressiveness based on remaining token budget.
+
+### Task 6.1: Token budget tracking
+
+- [ ] Add `token_budget` field to `CompressionConfig`
+- [ ] Track cumulative tokens sent across the session
+- [ ] Estimate remaining budget: `budget - total_sent`
+- [ ] Default budget: 150k tokens (typical Claude context before compaction)
+
+### Task 6.2: Adaptive compression levels
+
+- [ ] Define budget thresholds:
+  ```
+  > 70% remaining: level = Off (no compression needed)
+  50-70% remaining: level = Summary (default compression)
+  20-50% remaining: level = Aggressive (shorter summaries, more dedup)
+  < 20% remaining: level = Minimal (one-line per result, max dedup)
+  ```
+- [ ] Implement `auto_level(budget_remaining_pct) -> CompressionLevel`
+
+### Task 6.3: Per-level compression rules
+
+- [ ] **Off**: pass through raw output
+- [ ] **Summary**: current Phase 1 summary formats
+- [ ] **Aggressive**:
+  - Search: top-3 results, one line each
+  - Callers: count + top-3 names only
+  - Architecture: language counts only
+  - Seen-threshold: 5 turns (more aggressive dedup)
+- [ ] **Minimal**:
+  - Search: `"5 results, top: auth.rs::login (0.95)"`
+  - Callers: `"12 callers in 5 files"`
+  - Seen-threshold: 3 turns
+
+### Task 6.4: Run Phase 6 eval
+- [ ] Simulate sessions at each budget level
+- [ ] Measure quality at each level
+- [ ] Find the quality cliff — where does compression hurt?
+- [ ] Set safe defaults based on findings
+
+### Task 6.5: Multi-provider cache model adaptation
+
+- [ ] Anthropic: prefix-based KV cache, 5min TTL, 90% discount on cached tokens
+- [ ] OpenAI: similar prefix caching, different TTL and pricing
+- [ ] Google Gemini: context caching via explicit API, different model
+- [ ] Define `CacheModel` enum:
+  ```rust
+  enum CacheModel {
+      AnthropicPrefix { ttl_secs: u64 },
+      OpenAIPrefix { ttl_secs: u64 },
+      GeminiExplicit { cache_id: String },
+      Unknown,  // conservative: assume no caching
+  }
+  ```
+- [ ] Auto-detect provider from MCP client metadata or config
+- [ ] Adjust compression strategy per provider:
+  - Anthropic: compress only live zone (prefix caching)
+  - OpenAI: similar to Anthropic
+  - Gemini: can compress more aggressively (explicit cache means we control what's cached)
+  - Unknown: compress everything (safe default)
+- [ ] Add `provider` field to compression metrics
+
+### Deliverable
+- Budget-aware auto-scaling
+- Quality measurements per compression level
+
+---
+
+## Phase 7: Compress MCP Tool
+
+**Goal:** Expose compression as a standalone MCP tool for non-Infigraph content.
+
+### Task 7.1: Implement `compress` MCP tool
+
+- [ ] Add `compress` to MCP tool registry
+- [ ] Parameters:
+  ```json
+  {
+    "content": "string (required) — content to compress",
+    "type": "string (optional) — hint: json, log, code, markdown, stack_trace, build, auto",
+    "level": "string (optional) — summary (default), aggressive"
+  }
+  ```
+- [ ] Auto-detect content type if not specified
+- [ ] Return compressed content + metadata (original_tokens, compressed_tokens, type_detected)
+
+### Task 7.2: CLAUDE.md integration
+
+- [ ] Add instructions to project CLAUDE.md:
+  ```
+  When tool outputs or bash results exceed 500 tokens, 
+  call `compress` before including in context.
+  ```
+- [ ] Test with real Claude Code sessions
+
+### Task 7.3: Document the tool
+
+- [ ] Add to tool descriptions in `build_tools_list`
+- [ ] Add usage examples to docs
+
+### Deliverable
+- `compress` MCP tool available for any content
+- CLAUDE.md integration instructions
+
+---
+
+## Phase 8: A/B Testing and Production Rollout
+
+### Task 8.1: A/B config
+
+- [ ] Add to `.infigraph/config.toml`:
+  ```toml
+  [compression]
+  enabled = true
+  level = "auto"          # off | summary | auto | aggressive
+  log_metrics = true
+  metrics_path = ".infigraph/compression_metrics.jsonl"
+  budget_tokens = 150000
+  seen_staleness_turns = 10
+  ```
+- [ ] Support runtime toggle via environment variable: `INFIGRAPH_COMPRESSION=off`
+
+### Task 8.2: Metrics dashboard
+
+- [ ] Create `get_compression_stats` MCP tool:
+  ```
+  Compression stats (last 7 days):
+    Total calls: 342
+    Tokens saved: 487,230 (62% reduction)
+    Detail retrievals: 28 (8.2% of calls)
+    Quality incidents: 0
+    
+  Per-tool breakdown:
+    search:           78% savings, 3% detail rate
+    get_doc_context:   55% savings, 12% detail rate
+    trace_callers:     82% savings, 5% detail rate
+    get_architecture:  71% savings, 2% detail rate
+    find_all_refs:     76% savings, 7% detail rate
+  ```
+
+### Task 8.3: Quality monitoring
+
+- [ ] If detail retrieval rate > 30% for any tool → auto-reduce compression for that tool
+- [ ] Log when LLM asks follow-up questions that suggest information was lost
+- [ ] Weekly quality audit: sample 10 compressed responses, verify no critical info dropped
+
+### Task 8.4: Gradual rollout
+
+- [ ] Week 1: `level = summary` for search only (highest volume, easiest to verify)
+- [ ] Week 2: add `get_doc_context` and `trace_callers`
+- [ ] Week 3: add remaining tools + session tracking
+- [ ] Week 4: add generic compressors + ML prose
+- [ ] Week 5: add cross-agent sharing
+- [ ] Week 6: enable budget-aware auto-scaling
+- [ ] Week 7: full production
+
+### Deliverable
+- Production-ready compression with config, metrics, monitoring
+- Rollout complete with quality verification at each stage
+
+---
+
+## Test Strategy
+
+### Unit Tests per Compressor
+
+Each compressor must have dedicated unit tests with explicit input → expected output pairs.
+
+#### JSON compressor tests (`compress/tests/json_tests.rs`)
+| Test | Input | Expected output |
+|------|-------|----------------|
+| `test_json_array_basic` | `[{"id":1,"name":"alice"},{"id":2,"name":"bob"},...{"id":100,"name":"zoe"}]` | `JSON array (100 items), schema: {id: int, name: str}\nSample: {"id":1,"name":"alice"}\nSample: {"id":100,"name":"zoe"}` |
+| `test_json_object_nested` | `{"config":{"db":{"host":"localhost","port":5432,"pool":{"min":5,"max":20,"timeout":30000}}}}` | Top-level keys preserved, nested values truncated at depth 3 |
+| `test_json_empty_array` | `[]` | `JSON array (0 items)` — no compression, pass through |
+| `test_json_single_item` | `[{"id":1}]` | Pass through raw — too small to compress |
+| `test_json_mixed_types` | Array with heterogeneous objects | Schema shows union of all keys with `?` for optional |
+| `test_json_malformed` | `{"broken": tru` | Fallback to raw output (not valid JSON) |
+| `test_json_large_values` | Object with 10KB string values | Values truncated to 100 chars with `...(truncated)` |
+
+#### Log compressor tests (`compress/tests/log_tests.rs`)
+| Test | Input | Expected output |
+|------|-------|----------------|
+| `test_log_repeated_lines` | 500 identical `[INFO] Processing...` lines | `[INFO] Processing...\n... (498 similar lines)\n[INFO] Processing...` |
+| `test_log_errors_preserved` | 100 INFO + 1 ERROR + 100 INFO | All INFO collapsed, ERROR shown in full with 1 line before/after |
+| `test_log_warnings_preserved` | Mix of INFO/WARN/ERROR | All WARN and ERROR preserved, INFO collapsed |
+| `test_log_no_timestamps` | Plain text that looks like logs but no timestamps | Falls back to PlainText classifier |
+| `test_log_mixed_formats` | syslog + JSON-structured logs mixed | Handles both formats, collapses each pattern independently |
+| `test_log_empty` | `""` | Pass through (bypass rule: < 100 tokens) |
+| `test_log_single_error` | One ERROR line | Pass through (nothing to collapse) |
+
+#### Stack trace compressor tests (`compress/tests/stack_tests.rs`)
+| Test | Input | Expected output |
+|------|-------|----------------|
+| `test_stack_rust_backtrace` | Rust panic with 30 frames | App frames kept, std/tokio frames collapsed to `... (N framework frames)` |
+| `test_stack_python_traceback` | Python traceback with site-packages | App frames kept, site-packages collapsed |
+| `test_stack_java_stacktrace` | Java NPE with spring/hibernate frames | App frames kept, framework collapsed |
+| `test_stack_nested_cause` | Error with 3-level cause chain | All cause messages preserved, frames collapsed per cause |
+| `test_stack_single_frame` | One-frame error | Pass through |
+| `test_stack_no_app_frames` | All framework frames | Keep all (can't determine app frames) with warning |
+
+#### File tree compressor tests (`compress/tests/tree_tests.rs`)
+| Test | Input | Expected output |
+|------|-------|----------------|
+| `test_tree_deep_nesting` | 5-level deep tree with 200 files | Leaf dirs collapsed: `models/ (7 files)`, intermediate dirs preserved |
+| `test_tree_flat` | 3 files, no dirs | Pass through |
+| `test_tree_single_deep_path` | `src/a/b/c/d/file.rs` | Full path preserved (only 1 file) |
+| `test_tree_mixed_depth` | Some dirs deep, some shallow | Collapse only leaf dirs with >3 files |
+
+#### Table compressor tests (`compress/tests/table_tests.rs`)
+| Test | Input | Expected output |
+|------|-------|----------------|
+| `test_table_markdown` | 50-row markdown table | Header + `(50 rows)` + first 3 rows + last row |
+| `test_table_tsv` | Tab-separated 100 rows | Same strategy, column alignment preserved |
+| `test_table_small` | 3-row table | Pass through (too small) |
+| `test_table_wide` | 20 columns | Keep all columns, compress rows |
+
+#### Build output compressor tests (`compress/tests/build_tests.rs`)
+| Test | Input | Expected output |
+|------|-------|----------------|
+| `test_build_cargo_success` | `Compiling` 47 crates, no errors | `Compiling 47 crates...\nBuild succeeded` |
+| `test_build_cargo_errors` | 45 Compiling + 2 errors + 1 warning | Compiling collapsed, errors/warnings in full |
+| `test_build_npm_install` | 200 `added` lines | `Installed 200 packages` + any warnings |
+| `test_build_mixed_output` | Compile + link + test output | Each phase collapsed separately |
+| `test_build_all_errors` | Only errors, no success | Pass through all errors |
+
+#### Prose/ML compressor tests (`compress/tests/prose_tests.rs`)
+| Test | Input | Expected output |
+|------|-------|----------------|
+| `test_prose_extractive_basic` | 1000-word markdown doc | Top-K sentences by TF-IDF score, headings preserved |
+| `test_prose_preserves_code_blocks` | Markdown with code fences | Code blocks passed through untouched, surrounding prose compressed |
+| `test_prose_preserves_links` | Text with URLs and references | All URLs preserved in output |
+| `test_prose_preserves_lists` | Bulleted/numbered lists | Lists preserved, prose paragraphs compressed |
+| `test_prose_short_text` | 50-word paragraph | Pass through (< 200 tokens threshold) |
+| `test_prose_headings_only` | Just headings, no body | Pass through |
+
+#### Tool-specific compressor tests (`compress/tests/tool_tests.rs`)
+| Test | Input | Expected output |
+|------|-------|----------------|
+| `test_search_summary_format` | Raw search output with 10 results | One-liner per result with score, kind, line range, edge counts |
+| `test_search_detail_passthrough` | Same input with `detail=true` | Raw output unchanged |
+| `test_doc_context_summary` | Full get_doc_context output | Signature + edge summary + complexity, no source |
+| `test_doc_context_edit_mode` | Same with `for_edit=true` | Full source of target, summary of callers |
+| `test_trace_summary` | trace_callers output depth=3 | Tree of names grouped by level, no source |
+| `test_architecture_summary` | Full architecture output | Language breakdown + top-5 hotspots only |
+| `test_refs_summary` | find_all_references output | File:line list grouped by file, no source |
+
+### Edge Case Test Matrix
+
+```rust
+#[cfg(test)]
+mod edge_cases {
+    // Input size edge cases
+    #[test] fn test_empty_input() // → pass through, no crash
+    #[test] fn test_single_char() // → pass through
+    #[test] fn test_single_line() // → pass through (< 100 tokens)
+    #[test] fn test_exactly_100_tokens() // → boundary: bypass threshold
+    #[test] fn test_101_tokens() // → compress
+    #[test] fn test_50k_tokens() // → compress, verify no OOM or timeout
+    #[test] fn test_100k_tokens() // → compress within 50ms budget
+
+    // Content edge cases
+    #[test] fn test_unicode_cjk() // → token count differs from word count
+    #[test] fn test_unicode_emoji() // → preserve in output
+    #[test] fn test_binary_content() // → detect and pass through
+    #[test] fn test_mixed_content_json_in_log() // → classify as LogOutput, preserve JSON errors
+    #[test] fn test_mixed_content_code_in_markdown() // → classify as Markdown, preserve code blocks
+    #[test] fn test_ansi_color_codes() // → strip before classifying, preserve in output if configured
+    #[test] fn test_null_bytes() // → handle gracefully, don't panic
+    #[test] fn test_very_long_single_line() // → handle (some outputs have no newlines)
+
+    // Compression correctness
+    #[test] fn test_all_entity_names_preserved() // → every symbol/file name in raw appears in compressed
+    #[test] fn test_all_error_messages_preserved() // → errors never compressed away
+    #[test] fn test_line_numbers_preserved() // → file:line references intact
+    #[test] fn test_no_hallucinated_content() // → compressed output is subset of raw, never adds text
+}
+```
+
+### Golden File / Snapshot Tests
+
+- [ ] Create `tests/compression_eval/golden/` directory
+- [ ] For each compressor, store input/output pairs as golden files:
+  ```
+  golden/
+    json/
+      array_100.input.json
+      array_100.expected.txt
+      object_nested.input.json
+      object_nested.expected.txt
+    log/
+      repeated_info.input.txt
+      repeated_info.expected.txt
+    stack/
+      rust_panic.input.txt
+      rust_panic.expected.txt
+    ...
+  ```
+- [ ] Test runner loads each pair, runs compressor, asserts output matches expected
+- [ ] On intentional format change: update golden files, require review of diff
+- [ ] CI gate: golden file test failures block merge
+
+### Round-Trip Tests
+
+Verify that summary → detail=true returns ALL information from raw output.
+
+```rust
+#[cfg(test)]
+mod round_trip {
+    // For every tool with summary/detail modes:
+    #[test]
+    fn test_search_round_trip() {
+        let raw = get_real_search_output();
+        let summary = compress_search(raw, detail=false);
+        let detail = compress_search(raw, detail=true);
+        // detail must equal raw (passthrough)
+        assert_eq!(detail, raw);
+        // summary must contain all result identifiers (file::symbol)
+        for result in parse_results(raw) {
+            assert!(summary.contains(&result.identifier));
+        }
+    }
+
+    #[test]
+    fn test_doc_context_round_trip() {
+        let raw = get_real_doc_context_output();
+        let summary = compress_doc_context(raw, detail=false);
+        // summary must contain: function name, all caller names, all callee names
+        let parsed = parse_doc_context(raw);
+        assert!(summary.contains(&parsed.function_name));
+        for caller in &parsed.callers {
+            assert!(summary.contains(&caller.name));
+        }
+    }
+
+    // Repeat for trace_callers, trace_callees, get_architecture, find_all_references
+}
+```
+
+### Performance / Latency Benchmarks
+
+```rust
+// Using criterion for microsecond-accurate benchmarks
+use criterion::{criterion_group, criterion_main, Criterion};
+
+fn bench_compressors(c: &mut Criterion) {
+    let json_input = load_fixture("json_array_1000.json");    // ~10KB
+    let log_input = load_fixture("server_log_5000.txt");       // ~50KB
+    let stack_input = load_fixture("java_stacktrace.txt");     // ~5KB
+    let tree_input = load_fixture("large_repo_tree.txt");      // ~20KB
+    let build_input = load_fixture("cargo_build_output.txt");  // ~30KB
+    let prose_input = load_fixture("readme_large.md");         // ~15KB
+
+    c.bench_function("compress_json_10kb", |b| b.iter(|| compress_json(&json_input)));
+    c.bench_function("compress_log_50kb", |b| b.iter(|| compress_log(&log_input)));
+    c.bench_function("compress_stack_5kb", |b| b.iter(|| compress_stack_trace(&stack_input)));
+    c.bench_function("compress_tree_20kb", |b| b.iter(|| compress_file_tree(&tree_input)));
+    c.bench_function("compress_build_30kb", |b| b.iter(|| compress_build_output(&build_input)));
+    c.bench_function("compress_prose_15kb", |b| b.iter(|| compress_prose(&prose_input)));
+    c.bench_function("classify_content", |b| b.iter(|| classify_content(&json_input)));
+    c.bench_function("full_pipeline_50kb", |b| b.iter(|| compress_tool_output(&log_input, "bash", &args, &config)));
+}
+
+// Assertions (run as #[test], not benchmark):
+// - Each individual compressor: < 10ms for typical input
+// - Full pipeline: < 50ms for 50KB input
+// - classify_content: < 1ms
+// - No compressor allocates > 2x input size
+```
+
+### Content Classifier Tests
+
+```rust
+#[cfg(test)]
+mod classifier {
+    #[test] fn test_classify_json_object() { assert_eq!(classify("{}"), Json); }
+    #[test] fn test_classify_json_array() { assert_eq!(classify("[1,2]"), JsonArray); }
+    #[test] fn test_classify_json_nested() { assert_eq!(classify(r#"{"a":{"b":1}}"#), Json); }
+    #[test] fn test_classify_log_syslog() { assert_eq!(classify("2026-07-10 12:00:00 INFO ..."), LogOutput); }
+    #[test] fn test_classify_log_json_structured() { assert_eq!(classify(r#"{"level":"info","ts":"..."}"#), LogOutput); } // JSON-structured logs → LogOutput not Json
+    #[test] fn test_classify_stack_rust() { assert_eq!(classify("thread 'main' panicked at ..."), StackTrace); }
+    #[test] fn test_classify_stack_python() { assert_eq!(classify("Traceback (most recent call last):"), StackTrace); }
+    #[test] fn test_classify_stack_java() { assert_eq!(classify("Exception in thread \"main\" java.lang.NullPointerException\n\tat com.foo.Bar.baz(Bar.java:42)"), StackTrace); }
+    #[test] fn test_classify_file_tree() { assert_eq!(classify("├── src/\n│   ├── main.rs"), FileTree); }
+    #[test] fn test_classify_table_markdown() { assert_eq!(classify("| col1 | col2 |\n| --- | --- |"), Table); }
+    #[test] fn test_classify_source_rust() { assert_eq!(classify("fn main() {\n    println!(\"hello\");\n}"), SourceCode { language: "rust".into() }); }
+    #[test] fn test_classify_source_python() { assert_eq!(classify("def main():\n    print('hello')"), SourceCode { language: "python".into() }); }
+    #[test] fn test_classify_markdown() { assert_eq!(classify("# Title\n\nSome paragraph text."), Markdown); }
+    #[test] fn test_classify_plain_text() { assert_eq!(classify("just some random text"), PlainText); }
+    #[test] fn test_classify_build_cargo() { assert_eq!(classify("   Compiling foo v0.1.0\n   Compiling bar v0.2.0"), BuildOutput); }
+    #[test] fn test_classify_build_npm() { assert_eq!(classify("added 150 packages in 3s"), BuildOutput); }
+    #[test] fn test_classify_ambiguous_prefers_specific() // JSON-like log line → LogOutput wins over Json
+    #[test] fn test_classify_empty() { assert_eq!(classify(""), PlainText); }
+    #[test] fn test_classify_whitespace_only() { assert_eq!(classify("   \n\n  "), PlainText); }
+    #[test] fn test_classify_with_hint() { assert_eq!(classify_with_hint("...", "json"), Json); } // hint overrides heuristic
+}
+```
+
+### Session Dedup Tests
+
+```rust
+#[cfg(test)]
+mod session_dedup {
+    #[test]
+    fn test_first_seen_passes_through() {
+        let mut ctx = SessionContext::new();
+        let output = "auth.rs::login source code...";
+        let result = apply_dedup(output, "auth.rs", "login", &mut ctx);
+        assert_eq!(result, output); // first time → full output
+    }
+
+    #[test]
+    fn test_same_hash_deduped() {
+        let mut ctx = SessionContext::new();
+        let output = "auth.rs::login source code...";
+        apply_dedup(output, "auth.rs", "login", &mut ctx); // first time
+        ctx.increment_turn();
+        let result = apply_dedup(output, "auth.rs", "login", &mut ctx);
+        assert!(result.contains("(seen in turn 1: auth.rs::login)"));
+        assert!(!result.contains("source code")); // full source removed
+    }
+
+    #[test]
+    fn test_different_hash_shows_full() {
+        let mut ctx = SessionContext::new();
+        apply_dedup("version 1", "auth.rs", "login", &mut ctx);
+        ctx.increment_turn();
+        let result = apply_dedup("version 2", "auth.rs", "login", &mut ctx);
+        assert_eq!(result, "version 2"); // content changed → show full
+    }
+
+    #[test]
+    fn test_stale_after_threshold_shows_full() {
+        let mut ctx = SessionContext::new();
+        let output = "auth.rs::login source code...";
+        apply_dedup(output, "auth.rs", "login", &mut ctx);
+        for _ in 0..11 { ctx.increment_turn(); } // 11 turns later
+        let result = apply_dedup(output, "auth.rs", "login", &mut ctx);
+        assert_eq!(result, output); // stale → show full again
+    }
+
+    #[test]
+    fn test_focus_set_never_deduped() {
+        let mut ctx = SessionContext::new();
+        ctx.set_focus(vec!["auth.rs".to_string()]);
+        let output = "auth.rs::login source code...";
+        apply_dedup(output, "auth.rs", "login", &mut ctx);
+        ctx.increment_turn();
+        let result = apply_dedup(output, "auth.rs", "login", &mut ctx);
+        assert_eq!(result, output); // in focus set → always full
+    }
+
+    #[test]
+    fn test_dedup_token_savings_logged() {
+        let mut ctx = SessionContext::new();
+        let output = "x".repeat(1000);
+        apply_dedup(&output, "big.rs", "func", &mut ctx);
+        ctx.increment_turn();
+        apply_dedup(&output, "big.rs", "func", &mut ctx);
+        assert!(ctx.dedup_tokens_saved > 900); // nearly all tokens saved
+    }
+}
+```
+
+### Concurrent Agent Tests
+
+```rust
+#[cfg(test)]
+mod concurrent_agents {
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    #[tokio::test]
+    async fn test_shared_context_concurrent_writes() {
+        let ctx = Arc::new(Mutex::new(SharedContext::new()));
+        let mut handles = vec![];
+        for i in 0..10 {
+            let ctx = ctx.clone();
+            handles.push(tokio::spawn(async move {
+                let mut ctx = ctx.lock().await;
+                ctx.store_snapshot(format!("key_{i}"), format!("data_{i}"), format!("agent_{i}"));
+            }));
+        }
+        for h in handles { h.await.unwrap(); }
+        let ctx = ctx.lock().await;
+        assert_eq!(ctx.snapshot_count(), 10);
+    }
+
+    #[tokio::test]
+    async fn test_shared_context_concurrent_read_write() {
+        let ctx = Arc::new(Mutex::new(SharedContext::new()));
+        ctx.lock().await.store_snapshot("key_0", "data_0", "agent_0");
+        
+        let mut handles = vec![];
+        // 5 readers + 5 writers simultaneously
+        for i in 0..5 {
+            let ctx = ctx.clone();
+            handles.push(tokio::spawn(async move {
+                let ctx = ctx.lock().await;
+                ctx.get_snapshot("key_0") // reader
+            }));
+            let ctx2 = ctx.clone();
+            handles.push(tokio::spawn(async move {
+                let mut ctx = ctx2.lock().await;
+                ctx.store_snapshot(format!("key_{}", i+1), format!("data_{}", i+1), format!("agent_{}", i+1));
+            }));
+        }
+        for h in handles { h.await.unwrap(); }
+    }
+
+    #[tokio::test]
+    async fn test_dedup_across_agents() {
+        let ctx = Arc::new(Mutex::new(SharedContext::new()));
+        // Agent A analyzes auth.rs
+        {
+            let mut ctx = ctx.lock().await;
+            ctx.store_snapshot("trace:auth.rs:login", "12 callers in 5 files", "agent_a");
+        }
+        // Agent B requests same analysis
+        {
+            let ctx = ctx.lock().await;
+            let existing = ctx.get_snapshot("trace:auth.rs:login");
+            assert!(existing.is_some()); // cache hit, no re-analysis needed
+            assert_eq!(existing.unwrap().created_by, "agent_a");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_lru_eviction() {
+        let mut ctx = SharedContext::with_max_snapshots(5);
+        for i in 0..10 {
+            ctx.store_snapshot(format!("key_{i}"), format!("data_{i}"), "agent");
+        }
+        assert_eq!(ctx.snapshot_count(), 5); // oldest 5 evicted
+        assert!(ctx.get_snapshot("key_0").is_none()); // evicted
+        assert!(ctx.get_snapshot("key_9").is_some()); // still there
+    }
+}
+```
+
+### Compression Ratio Regression Tests
+
+```rust
+#[cfg(test)]
+mod ratio_regression {
+    // These tests FAIL if compression ratio drifts beyond acceptable bounds.
+    // Update expected ratios intentionally when changing compressor logic.
+
+    #[test]
+    fn test_json_array_ratio() {
+        let input = load_fixture("json_array_1000.json"); // 1000-item array
+        let output = compress_json(&input);
+        let ratio = output.len() as f64 / input.len() as f64;
+        assert!(ratio < 0.15, "JSON array compression ratio {ratio:.2} exceeds 0.15 (>85% reduction expected)");
+        assert!(ratio > 0.01, "JSON array compression ratio {ratio:.2} suspiciously low — data loss?");
+    }
+
+    #[test]
+    fn test_log_repeated_ratio() {
+        let input = "[INFO] Processing item\n".repeat(500);
+        let output = compress_log(&input);
+        let ratio = output.len() as f64 / input.len() as f64;
+        assert!(ratio < 0.05, "Log compression ratio {ratio:.2} exceeds 0.05 (>95% reduction expected for repeated lines)");
+    }
+
+    #[test]
+    fn test_search_output_ratio() {
+        let input = load_fixture("search_20_results.txt"); // typical search output
+        let output = compress_search(&input, false);
+        let ratio = output.len() as f64 / input.len() as f64;
+        assert!(ratio < 0.25, "Search compression ratio {ratio:.2} exceeds 0.25 (>75% reduction expected)");
+    }
+
+    #[test]
+    fn test_trace_callers_ratio() {
+        let input = load_fixture("trace_callers_depth3.txt"); // 47 callers
+        let output = compress_trace(&input, false);
+        let ratio = output.len() as f64 / input.len() as f64;
+        assert!(ratio < 0.20, "Trace compression ratio {ratio:.2} exceeds 0.20 (>80% reduction expected)");
+    }
+
+    #[test]
+    fn test_stack_trace_ratio() {
+        let input = load_fixture("rust_panic_30_frames.txt");
+        let output = compress_stack_trace(&input);
+        let ratio = output.len() as f64 / input.len() as f64;
+        assert!(ratio < 0.30, "Stack trace compression ratio {ratio:.2} exceeds 0.30 (>70% reduction expected)");
+    }
+
+    // Smoke test: NO compressor should ever INCREASE output size
+    #[test]
+    fn test_no_compressor_increases_size() {
+        let fixtures = load_all_fixtures();
+        for (name, input) in fixtures {
+            let output = compress_tool_output(&input, "test", &default_args(), &config());
+            assert!(output.len() <= input.len() + 50, // +50 for metadata headers
+                "Compressor increased size for {name}: {input_len} → {output_len}",
+                input_len = input.len(), output_len = output.len());
+        }
+    }
+}
+```
+
+### Integration Tests with Real MCP Flow
+
+```rust
+#[cfg(test)]
+mod integration {
+    // End-to-end: call tool → compress → verify output is useful
+
+    #[tokio::test]
+    async fn test_search_compressed_still_parseable() {
+        let server = start_test_mcp_server(compression_enabled=true);
+        let result = server.call_tool("search", json!({"query": "login", "path": "/test/repo"})).await;
+        // Compressed output must contain:
+        assert!(result.contains("results for")); // header
+        assert!(result.contains("::")); // symbol references
+        assert!(result.contains("detail=true")); // retrieval hint
+    }
+
+    #[tokio::test]
+    async fn test_detail_retrieval_works() {
+        let server = start_test_mcp_server(compression_enabled=true);
+        let summary = server.call_tool("search", json!({"query": "login"})).await;
+        assert!(!summary.contains("fn login")); // no source in summary
+        let detail = server.call_tool("search", json!({"query": "login", "detail": true})).await;
+        assert!(detail.contains("fn login")); // full source in detail
+    }
+
+    #[tokio::test]
+    async fn test_compression_metrics_logged() {
+        let server = start_test_mcp_server(compression_enabled=true);
+        server.call_tool("search", json!({"query": "login"})).await;
+        let metrics = read_metrics_file();
+        assert_eq!(metrics.len(), 1);
+        assert!(metrics[0].compression_ratio < 1.0);
+        assert!(metrics[0].raw_tokens > metrics[0].compressed_tokens);
+    }
+
+    #[tokio::test]
+    async fn test_bypass_on_error() {
+        let server = start_test_mcp_server(compression_enabled=true);
+        let result = server.call_tool("search", json!({"query": "login", "path": "/nonexistent"})).await;
+        // Error output should NOT be compressed
+        let metrics = read_metrics_file();
+        assert!(metrics.last().unwrap().bypassed);
+    }
+
+    #[tokio::test]
+    async fn test_session_dedup_across_calls() {
+        let server = start_test_mcp_server(compression_enabled=true);
+        let r1 = server.call_tool("search", json!({"query": "login"})).await;
+        let r2 = server.call_tool("search", json!({"query": "login"})).await;
+        // Second call should have "(seen)" markers
+        assert!(r2.contains("(seen"));
+        assert!(r2.len() < r1.len()); // dedup made it shorter
+    }
+
+    #[tokio::test]
+    async fn test_full_pipeline_under_50ms() {
+        let server = start_test_mcp_server(compression_enabled=true);
+        let start = Instant::now();
+        server.call_tool("search", json!({"query": "login"})).await;
+        let elapsed = start.elapsed();
+        let baseline = measure_without_compression();
+        let overhead = elapsed - baseline;
+        assert!(overhead < Duration::from_millis(50), "Compression overhead {overhead:?} exceeds 50ms");
+    }
+}
+```
+
+### Test File Structure
+
+Update the file structure section to add test files. Find the existing `tests/compression_eval/` block and replace with:
+
+```
+tests/compression_eval/
+    tasks.json          — 20 eval task definitions
+    baseline.json       — Phase 0 baseline results
+    phase1.json         — Phase 1 results
+    phase2.json         — Phase 2 results
+    phase3.json         — Phase 3 results
+    run_eval.rs         — eval harness
+    golden/             — golden file snapshot tests
+      json/             — JSON compressor input/expected pairs
+      log/              — Log compressor input/expected pairs
+      stack/            — Stack trace compressor input/expected pairs
+      tree/             — File tree compressor input/expected pairs
+      table/            — Table compressor input/expected pairs
+      build/            — Build output compressor input/expected pairs
+      prose/            — Prose compressor input/expected pairs
+      tools/            — Per-tool compressor input/expected pairs
+    fixtures/           — Large realistic test inputs
+      json_array_1000.json
+      server_log_5000.txt
+      rust_panic_30_frames.txt
+      large_repo_tree.txt
+      cargo_build_output.txt
+      readme_large.md
+      search_20_results.txt
+      trace_callers_depth3.txt
+
+crates/infigraph-mcp/src/compress/tests/
+    mod.rs              — test module root
+    json_tests.rs       — JSON compressor unit tests
+    log_tests.rs        — Log compressor unit tests
+    stack_tests.rs      — Stack trace compressor unit tests
+    tree_tests.rs       — File tree compressor unit tests
+    table_tests.rs      — Table compressor unit tests
+    build_tests.rs      — Build output compressor unit tests
+    prose_tests.rs      — Prose/ML compressor unit tests
+    tool_tests.rs       — Per-tool compressor unit tests
+    classify_tests.rs   — Content classifier unit tests
+    session_tests.rs    — Session dedup unit tests
+    agent_tests.rs      — Concurrent agent / SharedContext tests
+    ratio_tests.rs      — Compression ratio regression tests
+    edge_cases.rs       — Edge case test matrix
+    round_trip.rs       — Summary → detail round-trip tests
+```
+
+---
+
+## Quality Benchmarks
+
+### Eval task categories
+
+#### Category 1: Code Search (5 tasks)
+| ID | Task | Quality check |
+|----|------|--------------|
+| S1 | Find where authentication is handled | Correct file + function identified |
+| S2 | Find all API route definitions | All routes found (count match) |
+| S3 | Find configuration loading code | Correct config source identified |
+| S4 | Find test files for auth module | All test files found |
+| S5 | Find error handling patterns | Correct pattern identified |
+
+#### Category 2: Code Editing (5 tasks)
+| ID | Task | Quality check |
+|----|------|--------------|
+| E1 | Fix null check bug in specific function | Same diff as uncompressed |
+| E2 | Add parameter to function + update callers | All callers updated |
+| E3 | Change return type of function | All type references updated |
+| E4 | Add error handling to function | Correct error handling added |
+| E5 | Add input validation | Correct validation logic |
+
+#### Category 3: Refactoring (5 tasks)
+| ID | Task | Quality check |
+|----|------|--------------|
+| R1 | Rename function across codebase | All references updated |
+| R2 | Extract helper function | Correct extraction, callers updated |
+| R3 | Move function to different module | Imports updated everywhere |
+| R4 | Change function signature | All call sites updated |
+| R5 | Remove dead code | Correct code removed, nothing else |
+
+#### Category 4: Understanding (5 tasks)
+| ID | Task | Quality check |
+|----|------|--------------|
+| U1 | Explain authentication flow | Key steps mentioned (checklist) |
+| U2 | Trace data from API to database | Correct path identified |
+| U3 | Identify downstream dependencies | All deps found (count match) |
+| U4 | Architecture overview | Key components mentioned |
+| U5 | Blast radius of changing function X | Correct impact set |
+
+### Measurement protocol
+
+For each task, record:
+```json
+{
+  "task_id": "S1",
+  "phase": "baseline",
+  "tokens_input": 12500,
+  "tokens_output": 800,
+  "tool_calls": 3,
+  "tool_tokens": [4200, 3800, 2100],
+  "answer_correct": true,
+  "answer_quality": 5,
+  "detail_retrievals": 0,
+  "time_to_answer_ms": 8500
+}
+```
+
+### Quality scoring
+
+| Score | Meaning |
+|-------|---------|
+| 5 | Perfect match with uncompressed answer |
+| 4 | Same conclusion, minor detail difference |
+| 3 | Correct direction, missing some context |
+| 2 | Partially correct, important info lost |
+| 1 | Wrong answer due to missing context |
+
+**Threshold:** mean quality score ≥ 4.5 across all tasks per phase.
+
+---
+
+## Success Criteria
+
+| Metric | Phase 2 | Phase 3 | Phase 4 | Phase 5 | Full |
+|--------|---------|---------|---------|---------|------|
+| Token savings (mean) | ≥40% | ≥55% | ≥65% | ≥70% | ≥75% |
+| Answer quality (mean) | ≥4.5/5 | ≥4.5/5 | ≥4.5/5 | ≥4.5/5 | ≥4.5/5 |
+| Quality match rate | ≥95% | ≥95% | ≥95% | ≥95% | ≥95% |
+| Detail retrieval rate | ≤25% | ≤20% | ≤20% | ≤15% | ≤10% |
+| Latency overhead | ≤30ms | ≤40ms | ≤50ms | ≤50ms | ≤60ms |
+| Multi-agent savings | — | — | — | ≥30% | ≥40% |
+| Compression failures | ≤5% | ≤3% | ≤2% | ≤1% | ≤0.5% |
+
+---
+
+## Risk Register
+
+| Risk | Impact | Likelihood | Mitigation |
+|------|--------|-----------|------------|
+| LLM produces wrong edits due to missing context | High | Medium | Never compress edit targets; progressive disclosure |
+| Detail retrieval creates more tokens than savings | Medium | Low | Monitor retrieval rate; reduce compression if > 30% |
+| Session context gets out of sync | Medium | Medium | Content hash verification; staleness threshold |
+| Compression latency impacts responsiveness | Low | Low | All compression is simple string ops, < 50ms |
+| Different LLMs need different compression levels | Medium | Medium | Make compression level configurable per model |
+| Build output compression hides real errors | High | Low | Always preserve errors + warnings; test with real failures |
+| JSON schema inference incorrect | Low | Medium | Fall back to truncation if schema can't be inferred |
+| ML model dependency (Kompress) | Medium | Low | Default to extractive (no model); Kompress opt-in only |
+| Cross-agent sync race conditions | Medium | Medium | SharedContext behind Mutex; content-hash based dedup is idempotent |
+| Cache alignment breaks on provider changes | High | Low | Monitor cache_read_tokens; alert if cache hit rate drops below 80% |
+| Context compaction loses compression state | Medium | High | Persist SessionContext to LM2; restore on session resume |
+| Token counting inaccuracy skews budget decisions | Medium | Medium | Calibrate tokenizer per content type; use tiktoken-rs for accuracy |
+| Smart prefetch wastes tokens on wrong predictions | Low | Medium | Track prefetch accuracy; auto-disable if < 50% hit rate |
+
+---
+
+## File structure
+
+```
+crates/infigraph-mcp/src/
+  compress/
+    mod.rs          — CompressionConfig, compress_tool_output()
+    classify.rs     — ContentType enum, classify_content()
+    tools.rs        — per-tool compressors (search, doc_context, etc.)
+    generic.rs      — generic compressors (json, log, stack, tree, table)
+    session.rs      — SessionContext, seen-dedup logic
+    metrics.rs      — CompressionMetrics, logging, stats
+    budget.rs       — budget tracking, auto-level selection
+    cache.rs        — CacheAligner, live-zone gate, frozen prefix detection
+    ml.rs           — ML extractive summarizer, optional Kompress integration
+    agents.rs       — SharedContext, agent provenance, cross-agent dedup
+  
+tests/compression_eval/
+    tasks.json          — 20 eval task definitions
+    baseline.json       — Phase 0 baseline results
+    phase1.json         — Phase 1 results
+    phase2.json         — Phase 2 results
+    phase3.json         — Phase 3 results
+    run_eval.rs         — eval harness
+    golden/             — golden file snapshot tests
+      json/             — JSON compressor input/expected pairs
+      log/              — Log compressor input/expected pairs
+      stack/            — Stack trace compressor input/expected pairs
+      tree/             — File tree compressor input/expected pairs
+      table/            — Table compressor input/expected pairs
+      build/            — Build output compressor input/expected pairs
+      prose/            — Prose compressor input/expected pairs
+      tools/            — Per-tool compressor input/expected pairs
+    fixtures/           — Large realistic test inputs
+      json_array_1000.json
+      server_log_5000.txt
+      rust_panic_30_frames.txt
+      large_repo_tree.txt
+      cargo_build_output.txt
+      readme_large.md
+      search_20_results.txt
+      trace_callers_depth3.txt
+
+crates/infigraph-mcp/src/compress/tests/
+    mod.rs              — test module root
+    json_tests.rs       — JSON compressor unit tests
+    log_tests.rs        — Log compressor unit tests
+    stack_tests.rs      — Stack trace compressor unit tests
+    tree_tests.rs       — File tree compressor unit tests
+    table_tests.rs      — Table compressor unit tests
+    build_tests.rs      — Build output compressor unit tests
+    prose_tests.rs      — Prose/ML compressor unit tests
+    tool_tests.rs       — Per-tool compressor unit tests
+    classify_tests.rs   — Content classifier unit tests
+    session_tests.rs    — Session dedup unit tests
+    agent_tests.rs      — Concurrent agent / SharedContext tests
+    ratio_tests.rs      — Compression ratio regression tests
+    edge_cases.rs       — Edge case test matrix
+    round_trip.rs       — Summary → detail round-trip tests
+```
+
+---
+
+## Timeline estimate
+
+| Phase | Effort | Depends on |
+|-------|--------|-----------|
+| Phase 0: Baseline | 1 day | — |
+| Phase 1: Cache alignment | 1-2 days | — |
+| Phase 2: Tool output shaping | 3-4 days | Phase 0 |
+| Phase 3: Session tracking | 2 days | Phase 2 |
+| Phase 4: Generic compressors + ML | 3-4 days | Phase 2 |
+| Phase 5: Cross-agent sharing | 2-3 days | Phase 3 |
+| Phase 6: Budget-aware | 1-2 days | Phase 3 |
+| Phase 7: Compress MCP tool | 1 day | Phase 4 |
+| Phase 8: A/B + rollout | 3 weeks (gradual) | All phases |
+
+**Total build time: ~15-18 days + 3 weeks rollout monitoring**
