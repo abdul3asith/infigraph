@@ -260,6 +260,50 @@ pub fn tool_group_link(args: &Value) -> Result<String> {
     ))
 }
 
+pub fn tool_group_link_docs(args: &Value) -> Result<String> {
+    let group_name = args
+        .get("group_name")
+        .and_then(|g| g.as_str())
+        .context("missing 'group_name' argument")?;
+
+    let registry = Registry::load()?;
+    let group = registry
+        .groups
+        .get(group_name)
+        .context(format!("group '{}' not found", group_name))?;
+
+    let mut repo_data: Vec<(String, std::path::PathBuf, infigraph_docs::DocIndex)> = Vec::new();
+    for repo_name in &group.repos {
+        if let Some(entry) = registry.repos.get(repo_name) {
+            let mut idx = infigraph_docs::DocIndex::open(&entry.path)?;
+            idx.init()?;
+            repo_data.push((repo_name.clone(), entry.path.clone(), idx));
+        }
+    }
+
+    let repo_docs: Vec<(
+        String,
+        std::path::PathBuf,
+        &infigraph_docs::store::DocStore,
+        std::collections::HashSet<String>,
+    )> = repo_data
+        .iter()
+        .filter_map(|(name, root, idx)| {
+            let store = idx.store()?;
+            let ids: std::collections::HashSet<String> =
+                store.get_doc_hashes().ok()?.keys().cloned().collect();
+            Some((name.clone(), root.clone(), store, ids))
+        })
+        .collect();
+
+    let count = infigraph_docs::links::cross_link_group_docs(&repo_docs);
+
+    Ok(format!(
+        "Created {} cross-repo doc LINKS_TO edges in group '{}'.",
+        count, group_name
+    ))
+}
+
 pub fn tool_group_search(args: &Value) -> Result<String> {
     let group_name = args
         .get("group_name")
@@ -320,28 +364,75 @@ pub fn tool_group_build(args: &Value) -> Result<String> {
         full,
         infigraph_languages::bundled_registry,
     )?;
-    out.push_str(&format!("Step 1/4 — Indexed {} repos:\n", results.len()));
+    out.push_str(&format!("Step 1/5 — Indexed {} repos:\n", results.len()));
     for (repo, indexed, total) in &results {
         out.push_str(&format!("  {}: {}/{} files\n", repo, indexed, total));
     }
 
     // Step 2: Sync contracts
     let contract_count = multi::sync_group_contracts(&mut registry, group_name, bundled_registry)?;
-    out.push_str(&format!("Step 2/4 — {} contracts synced\n", contract_count));
+    out.push_str(&format!("Step 2/5 — {} contracts synced\n", contract_count));
 
     // Step 3: Link cross-service calls
     let edge_count = multi::link_cross_service_calls(&registry, group_name, bundled_registry)?;
     out.push_str(&format!(
-        "Step 3/4 — {} CALLS_SERVICE edges linked\n",
+        "Step 3/5 — {} CALLS_SERVICE edges linked\n",
         edge_count
     ));
 
     // Step 4: Build combined graph
     let (symbols, edges) = combined::build_combined_graph(&registry, group_name)?;
     out.push_str(&format!(
-        "Step 4/4 — Combined graph: {} symbols, {} edges\n",
+        "Step 4/5 — Combined graph: {} symbols, {} edges\n",
         symbols, edges
     ));
+
+    // Step 5: Index docs + cross-repo doc linking
+    {
+        let registry2 = Registry::load()?;
+        let group2 = registry2.groups.get(group_name);
+        let mut repo_data: Vec<(String, std::path::PathBuf, infigraph_docs::DocIndex)> = Vec::new();
+        if let Some(g) = group2 {
+            for repo_name in &g.repos {
+                if let Some(entry) = registry2.repos.get(repo_name) {
+                    let mut idx = infigraph_docs::DocIndex::open(&entry.path).ok();
+                    if let Some(ref mut ix) = idx {
+                        let _ = ix.init();
+                        let _ = ix.index();
+                    }
+                    if let Some(ix) = idx {
+                        repo_data.push((repo_name.clone(), entry.path.clone(), ix));
+                    }
+                }
+            }
+        }
+        let total_docs: usize = repo_data
+            .iter()
+            .filter_map(|(_, _, idx)| {
+                idx.store()
+                    .and_then(|s| Some(s.get_doc_hashes().ok()?.len()))
+            })
+            .sum();
+        let repo_docs: Vec<(
+            String,
+            std::path::PathBuf,
+            &infigraph_docs::store::DocStore,
+            std::collections::HashSet<String>,
+        )> = repo_data
+            .iter()
+            .filter_map(|(name, root, idx)| {
+                let store = idx.store()?;
+                let ids: std::collections::HashSet<String> =
+                    store.get_doc_hashes().ok()?.keys().cloned().collect();
+                Some((name.clone(), root.clone(), store, ids))
+            })
+            .collect();
+        let doc_links = infigraph_docs::links::cross_link_group_docs(&repo_docs);
+        out.push_str(&format!(
+            "Step 5/5 — {} docs indexed, {} cross-repo doc links\n",
+            total_docs, doc_links
+        ));
+    }
 
     // Start watchers + CLAUDE.md
     if let Some(group) = registry.groups.get(group_name) {

@@ -1176,6 +1176,11 @@ Visit `http://localhost:4000/infigraph/` to view the site.
 
 See [docs/README.md](docs/README.md) for detailed documentation setup instructions.
 
+### Technical Deep Dives
+
+- **[Code Parsing](docs/CODE-PARSING.md)** — How source code is parsed, symbols extracted, relationships mapped, and the graph built. Covers tree-sitter parsing, the grammar plugin system, all 62 languages, edge types, Kùzu storage, incremental indexing, embeddings, search, watch mode, route/contract extraction, and multi-repo groups.
+- **[Document Indexing](docs/DOCUMENT-INDEXING.md)** — How documents are discovered, extracted, chunked, linked, and searched. Covers all supported formats (Markdown, PDF, DOCX, PPTX, XLSX, HTML, RTF, XML), BFS crawling, link classification, cross-repo document linking, DocStore schema, hybrid search, and watch mode.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for build instructions, code style, and how to add a language or submit a PR.

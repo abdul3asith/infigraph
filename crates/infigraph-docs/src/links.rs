@@ -7,10 +7,10 @@ use crate::extract::ExtractedDoc;
 use crate::store::DocStore;
 
 #[derive(Debug)]
-pub(crate) struct DocLink {
-    pub(crate) url: String,
-    pub(crate) link_type: String,
-    pub(crate) target_doc_id: Option<String>,
+pub struct DocLink {
+    pub url: String,
+    pub link_type: String,
+    pub target_doc_id: Option<String>,
 }
 
 pub fn extract_and_link_doc(store: &DocStore, doc: &ExtractedDoc, all_doc_ids: &HashSet<String>) {
@@ -30,7 +30,7 @@ pub fn extract_and_link_doc(store: &DocStore, doc: &ExtractedDoc, all_doc_ids: &
     }
 }
 
-pub(crate) fn extract_links(text: &str, doc_file: &str) -> Vec<DocLink> {
+pub fn extract_links(text: &str, doc_file: &str) -> Vec<DocLink> {
     let mut links = Vec::new();
 
     // Markdown links: [text](url)
@@ -76,6 +76,19 @@ fn classify_doc_link(url: &str, doc_file: &str) -> DocLink {
             link_type: "jira".to_string(),
             target_doc_id: None,
         };
+    }
+
+    // GitHub/GitLab blob URLs pointing to docs — resolve to target doc path
+    if (url.contains("/blob/") || url.contains("/-/blob/"))
+        && (url.starts_with("http://") || url.starts_with("https://"))
+    {
+        if let Some(doc_path) = extract_doc_path_from_url(url) {
+            return DocLink {
+                url: url.to_string(),
+                link_type: "github".to_string(),
+                target_doc_id: Some(doc_path),
+            };
+        }
     }
 
     // External URLs
@@ -221,6 +234,82 @@ pub fn extract_doc_path_from_url(url: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Extract the repository name from a GitHub/GitLab URL.
+/// e.g. "https://github.com/org/my-repo/blob/main/docs/foo.md" → Some("my-repo")
+pub fn extract_repo_from_url(url: &str) -> Option<String> {
+    // Strip protocol
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    // Skip host: github.com/org/repo/... or github.intuit.com/org/repo/...
+    let parts: Vec<&str> = rest.splitn(5, '/').collect();
+    // parts: [host, org, repo, "blob"|"tree"|..., rest]
+    if parts.len() >= 3 {
+        let repo = parts[2];
+        if !repo.is_empty() {
+            return Some(repo.to_string());
+        }
+    }
+    None
+}
+
+/// Create cross-repo LINKS_TO edges for docs that reference other repos via GitHub/GitLab URLs.
+/// Each tuple: (repo_name, repo_root_path, DocStore, set of doc IDs).
+/// For each repo, scans all docs for GitHub blob URLs, extracts target repo + doc path,
+/// and creates LINKS_TO edges in the SOURCE repo's store (target node ensured first).
+pub fn cross_link_group_docs(repo_docs: &[(String, PathBuf, &DocStore, HashSet<String>)]) -> usize {
+    use std::collections::HashMap;
+
+    // Build lookup: repo_name → (store, doc_ids)
+    let repo_lookup: HashMap<&str, (&DocStore, &HashSet<String>)> = repo_docs
+        .iter()
+        .map(|(name, _root, store, ids)| (name.as_str(), (*store, ids)))
+        .collect();
+
+    let mut total_linked = 0usize;
+
+    for (repo_name, repo_root, store, doc_ids) in repo_docs {
+        for doc_id in doc_ids {
+            let doc_path = repo_root.join(doc_id);
+            let text = match std::fs::read_to_string(&doc_path) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+
+            let links = extract_links(&text, doc_id);
+            for link in &links {
+                if link.link_type != "github" {
+                    continue;
+                }
+                let target_repo = match extract_repo_from_url(&link.url) {
+                    Some(r) => r,
+                    None => continue,
+                };
+                // Skip intra-repo (already handled by extract_and_link_doc)
+                if target_repo == *repo_name {
+                    continue;
+                }
+                let target_doc_path = match link.target_doc_id.as_ref() {
+                    Some(p) => p,
+                    None => continue,
+                };
+                // Check if target repo + doc exists in the group
+                if let Some((_target_store, target_ids)) = repo_lookup.get(target_repo.as_str()) {
+                    if target_ids.contains(target_doc_path) {
+                        // Create a cross-repo target ID: "repo_name::doc_path"
+                        let cross_id = format!("{}::{}", target_repo, target_doc_path);
+                        let _ = store.ensure_document_node(&cross_id);
+                        let _ = store.create_link(doc_id, &cross_id, &link.url, "cross_repo");
+                        total_linked += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    total_linked
 }
 
 /// Create LINKS_TO edges from manifest files to indexed docs based on doc_urls.

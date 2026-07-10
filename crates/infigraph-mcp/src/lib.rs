@@ -103,6 +103,7 @@ pub const MCP_ONLY_TOOLS: &[&str] = &[
     "get_latest_session",     // agent session management only
     "search_sessions",        // agent session management only
     "index_confluence_pages", // programmatic — CLI has `index-confluence`
+    "group_link_docs",        // cross-repo doc linking — runs as part of group_build
 ];
 
 pub const MCP_TOOL_NAMES: &[&str] = &[
@@ -134,6 +135,7 @@ pub const MCP_TOOL_NAMES: &[&str] = &[
     "group_deps",
     "group_index",
     "group_link",
+    "group_link_docs",
     "group_search",
     "group_build",
     "detect_clusters",
@@ -232,6 +234,7 @@ pub fn dispatch_tool(tool_name: &str, args: &Value) -> Result<String, anyhow::Er
         "group_deps" => tools::groups::tool_group_deps(args),
         "group_index" => tools::groups::tool_group_index(args),
         "group_link" => tools::groups::tool_group_link(args),
+        "group_link_docs" => tools::groups::tool_group_link_docs(args),
         "group_search" => tools::groups::tool_group_search(args),
         "group_build" => tools::groups::tool_group_build(args),
         "detect_clusters" => tools::analysis::call_graph::tool_detect_clusters(args),
@@ -393,6 +396,8 @@ pub fn build_tools_list() -> Vec<Value> {
         tool_def("group_index", "PRIMARY: Index (or reindex) all repos in a group in one call. Use for batch indexing microservice repos.",
             json!({"group_name":{"type":"string"},"full":{"type":"boolean","default":false,"description":"Clean and rebuild from scratch"}}), &["group_name"]),
         tool_def("group_link", "Link cross-service HTTP dependencies as CALLS_SERVICE edges in each caller repo's graph. Run after group_sync + group_deps. Enables cross-repo call graph traversal.",
+            json!({"group_name":{"type":"string"}}), &["group_name"]),
+        tool_def("group_link_docs", "Create cross-repo document LINKS_TO edges. Scans docs in each repo for GitHub/GitLab URLs pointing to docs in other repos in the group. Run after index_docs on all repos.",
             json!({"group_name":{"type":"string"}}), &["group_name"]),
         tool_def("group_search", "PRIMARY: Hybrid BM25+vector search across the combined graph of a group. Searches all symbols across all repos in one call. Requires group_build first. Use deep=true when initial results seem incomplete — enriches results with cross-repo graph edges (who calls what across services) for LLM reasoning.",
             json!({"group_name":{"type":"string"},"query":{"type":"string","description":"Search query"},"limit":{"type":"integer","default":20},"alpha":{"type":"number","default":0.3,"description":"BM25/vector blend (0=pure BM25, 1=pure vector)"},"deep":{"type":"boolean","default":false,"description":"Deep mode: enrich results with cross-repo call graph context. Use when tracing cross-service chains or when initial search misses related code in other repos."}}), &["group_name","query"]),

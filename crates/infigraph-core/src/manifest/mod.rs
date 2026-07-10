@@ -83,6 +83,48 @@ pub fn query_deps(store: &GraphStore) -> Result<Vec<DepEntry>> {
     Ok(deps)
 }
 
+/// Extract the package's own name from a manifest file at `root`.
+/// Checks pyproject.toml, package.json, Cargo.toml (in that order).
+pub fn extract_package_name(root: &Path) -> Option<String> {
+    for (file, extractor) in [
+        (
+            "pyproject.toml",
+            extract_name_pyproject as fn(&str) -> Option<String>,
+        ),
+        ("package.json", extract_name_package_json),
+        ("Cargo.toml", extract_name_cargo_toml),
+    ] {
+        let path = root.join(file);
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Some(name) = extractor(&content) {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
+fn extract_name_pyproject(content: &str) -> Option<String> {
+    let v: toml::Value = content.parse().ok()?;
+    v.get("project")?
+        .get("name")?
+        .as_str()
+        .map(|s| s.to_string())
+}
+
+fn extract_name_package_json(content: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(content).ok()?;
+    v.get("name")?.as_str().map(|s| s.to_string())
+}
+
+fn extract_name_cargo_toml(content: &str) -> Option<String> {
+    let v: toml::Value = content.parse().ok()?;
+    v.get("package")?
+        .get("name")?
+        .as_str()
+        .map(|s| s.to_string())
+}
+
 fn parse_manifest(path: &Path) -> Result<ManifestResult> {
     let name = path.file_name().unwrap_or_default().to_string_lossy();
     let content = std::fs::read_to_string(path)?;

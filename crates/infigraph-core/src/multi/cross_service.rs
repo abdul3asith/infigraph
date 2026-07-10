@@ -39,18 +39,18 @@ pub fn detect_cross_service_deps(
     // Skip paths shorter than 4 chars (e.g. "/") — too generic, matches everything
     // Also index wildcard prefixes: /v1/entities/schedules → /v1/entities/*
     // so dynamic URLs like f"/v1/entities/{x}" match after normalization.
-    let mut route_lookup: HashMap<String, (String, String)> = HashMap::new();
+    let mut route_lookup: HashMap<String, Vec<(String, String)>> = HashMap::new();
     // Wildcard prefixes collect ALL methods so we can pick the right one at match time.
     let mut wildcard_methods: HashMap<String, (String, Vec<String>)> = HashMap::new();
     for contract in &group.contracts {
         if contract.kind == ContractKind::HttpRoute {
             let normalized = normalize_route_path(&contract.path);
             if normalized.len() >= 4 {
-                // Index exact path
-                route_lookup.insert(
-                    normalized.clone(),
-                    (contract.service.clone(), contract.method.clone()),
-                );
+                // Index exact path — all services that define it
+                route_lookup
+                    .entry(normalized.clone())
+                    .or_default()
+                    .push((contract.service.clone(), contract.method.clone()));
                 // Index wildcard prefix: /a/b/c → /a/b/*
                 // Only for paths with 3+ segments to avoid overly broad matches
                 let segments: Vec<&str> = normalized.split('/').collect();
@@ -70,6 +70,19 @@ pub fn detect_cross_service_deps(
                     }
                 }
             }
+        }
+    }
+
+    // Track which normalized paths each service owns, so we can skip
+    // docstring/source matches that reference the service's own routes.
+    let mut own_routes: HashMap<String, HashSet<String>> = HashMap::new();
+    for contract in &group.contracts {
+        if contract.kind == ContractKind::HttpRoute {
+            let normalized = normalize_route_path(&contract.path);
+            own_routes
+                .entry(contract.service.clone())
+                .or_default()
+                .insert(normalized);
         }
     }
 
@@ -97,16 +110,25 @@ pub fn detect_cross_service_deps(
             Some((svc.clone(), method))
         };
 
-    // Resolve a route: exact match first, then wildcard fallback.
+    // Resolve a route: exact match first (skip self-matches), then wildcard fallback.
     // consumer_method is used to pick the right method from wildcard matches.
-    let resolve_route =
-        |normalized: &str, consumer_method: Option<&str>| -> Option<(String, String)> {
-            if let Some((svc, method)) = route_lookup.get(normalized) {
-                return Some((svc.clone(), method.clone()));
+    let resolve_route = |normalized: &str,
+                         consumer_method: Option<&str>,
+                         caller_repo: &str|
+     -> Option<(String, String)> {
+        if let Some(entries) = route_lookup.get(normalized) {
+            // Prefer a match from a different service
+            for (svc, method) in entries {
+                if svc != caller_repo {
+                    return Some((svc.clone(), method.clone()));
+                }
             }
-            let wildcard = format!("{}/*", normalized);
-            resolve_wildcard(&wildcard, consumer_method)
-        };
+            // All entries are self — no cross-service match
+            return None;
+        }
+        let wildcard = format!("{}/*", normalized);
+        resolve_wildcard(&wildcard, consumer_method)
+    };
 
     let mut deps = Vec::new();
 
@@ -144,7 +166,16 @@ pub fn detect_cross_service_deps(
             let urls = extract_api_paths(doc);
             for url in urls {
                 let normalized = normalize_route_path(&url);
-                if let Some((target_svc, target_method)) = resolve_route(&normalized, None) {
+                // Skip URLs that this service defines as its own routes
+                if own_routes
+                    .get(repo_name.as_str())
+                    .is_some_and(|routes| routes.contains(&normalized))
+                {
+                    continue;
+                }
+                if let Some((target_svc, target_method)) =
+                    resolve_route(&normalized, None, repo_name)
+                {
                     if target_svc != *repo_name {
                         deps.push(CrossServiceDep {
                             caller_service: repo_name.clone(),
@@ -165,7 +196,7 @@ pub fn detect_cross_service_deps(
         for (file, symbol_hint, url, consumer_method) in source_urls {
             let normalized = normalize_route_path(&url);
             if let Some((target_svc, target_method)) =
-                resolve_route(&normalized, consumer_method.as_deref())
+                resolve_route(&normalized, consumer_method.as_deref(), repo_name)
             {
                 if target_svc != *repo_name {
                     // Try to resolve line hint to enclosing symbol ID
@@ -234,15 +265,235 @@ pub fn detect_cross_service_deps(
         }
     }
 
-    // Dedup: keep first occurrence per (caller_service, caller_symbol, target_path).
+    // Shared-contract detection: find /openapi.json or /swagger.json fetches
+    // and link to services with HTTP contracts.
+    let services_with_routes: Vec<String> = {
+        let mut svcs: HashSet<String> = HashSet::new();
+        for contract in &group.contracts {
+            if contract.kind == ContractKind::HttpRoute {
+                svcs.insert(contract.service.clone());
+            }
+        }
+        svcs.into_iter().collect()
+    };
+    if !services_with_routes.is_empty() {
+        for repo_name in &group.repos {
+            let entry = match registry.repos.get(repo_name) {
+                Some(e) => e.clone(),
+                None => continue,
+            };
+            let spec_hits = scan_source_for_spec_fetches(&entry.path);
+            for (file, symbol_hint, spec_path) in spec_hits {
+                // Resolve symbol from line hint
+                let lang_registry = build_registry()?;
+                let caller_id = if let Some(stripped) = symbol_hint.strip_prefix("line:") {
+                    let line_num: i32 = stripped.parse().unwrap_or(0);
+                    if let Ok(mut prism) = Infigraph::open(&entry.path, lang_registry) {
+                        if prism.init().is_ok() {
+                            if let Some(store) = prism.store() {
+                                if let Ok(conn) = store.connection() {
+                                    let gq = GraphQuery::new(&conn);
+                                    let escaped_file = file.replace('\'', "\\'");
+                                    let q = format!(
+                                        "MATCH (s:Symbol) WHERE s.file = '{}' AND s.start_line <= {} AND s.end_line >= {} RETURN s.id ORDER BY (s.end_line - s.start_line) ASC LIMIT 1",
+                                        escaped_file, line_num, line_num
+                                    );
+                                    gq.raw_query(&q)
+                                        .ok()
+                                        .and_then(|rows| rows.into_iter().next())
+                                        .and_then(|row| row.into_iter().next())
+                                        .unwrap_or_else(|| format!("{}:{}", file, symbol_hint))
+                                } else {
+                                    format!("{}:{}", file, symbol_hint)
+                                }
+                            } else {
+                                format!("{}:{}", file, symbol_hint)
+                            }
+                        } else {
+                            format!("{}:{}", file, symbol_hint)
+                        }
+                    } else {
+                        format!("{}:{}", file, symbol_hint)
+                    }
+                } else {
+                    symbol_hint
+                };
+                for target_svc in &services_with_routes {
+                    if target_svc != repo_name {
+                        deps.push(CrossServiceDep {
+                            caller_service: repo_name.clone(),
+                            caller_file: file.clone(),
+                            caller_symbol: caller_id.clone(),
+                            target_service: target_svc.clone(),
+                            target_method: "SharedContract".to_string(),
+                            target_path: spec_path.clone(),
+                            url_found: spec_path.clone(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Shared-package detection: match each member's manifest deps against
+    // other members' package names.
+    let mut pkg_name_to_service: HashMap<String, String> = HashMap::new();
+    for repo_name in &group.repos {
+        if let Some(entry) = registry.repos.get(repo_name) {
+            if let Some(pkg) = crate::manifest::extract_package_name(&entry.path) {
+                pkg_name_to_service.insert(pkg, repo_name.clone());
+            }
+        }
+    }
+    if !pkg_name_to_service.is_empty() {
+        for repo_name in &group.repos {
+            if let Some(entry) = registry.repos.get(repo_name) {
+                let lang_reg = build_registry()?;
+                if let Ok(mut prism) = Infigraph::open(&entry.path, lang_reg) {
+                    if prism.init().is_ok() {
+                        if let Some(store) = prism.store() {
+                            if let Ok(member_deps) = crate::manifest::query_deps(store) {
+                                for dep in &member_deps {
+                                    if let Some(target_svc) = pkg_name_to_service.get(&dep.name) {
+                                        if target_svc != repo_name {
+                                            deps.push(CrossServiceDep {
+                                                caller_service: repo_name.clone(),
+                                                caller_file: "pyproject.toml".to_string(),
+                                                caller_symbol: "pyproject.toml".to_string(),
+                                                target_service: target_svc.clone(),
+                                                target_method: "SharedPackage".to_string(),
+                                                target_path: format!(
+                                                    "{}@{}",
+                                                    dep.name, dep.version
+                                                ),
+                                                url_found: dep.name.clone(),
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // MCP config detection: scan YAML/config files for mcp_servers entries
+    // with URLs pointing at other services (e.g. ${ASCEND_SVC_URL}/v1/mcp/qb-reports/).
+    // These represent runtime tool-schema consumption: an LLM agent reads the MCP
+    // tool schema at runtime with no compile-time caller.
+    {
+        // Collect service names that have HTTP route contracts matching /v1/qb/<topic>/
+        // so we can map MCP topic names to contract-owning services.
+        let mut topic_to_service: HashMap<String, String> = HashMap::new();
+        for contract in &group.contracts {
+            if contract.kind == ContractKind::HttpRoute {
+                // /v1/qb/reports/report-run → topic "qb-reports" (take segments 2-3, join with hyphen)
+                let segs: Vec<&str> = contract.path.split('/').collect();
+                if segs.len() >= 4 {
+                    // /v1/qb/reports/... → ["", "v1", "qb", "reports", ...]
+                    // MCP topic = "qb-reports" for path /v1/qb/reports/*
+                    if segs.len() >= 5 && segs[2] == "qb" {
+                        let topic = format!("{}-{}", segs[2], segs[3]);
+                        topic_to_service
+                            .entry(topic)
+                            .or_insert_with(|| contract.service.clone());
+                    }
+                }
+            }
+        }
+
+        for repo_name in &group.repos {
+            let entry = match registry.repos.get(repo_name) {
+                Some(e) => e.clone(),
+                None => continue,
+            };
+            let mcp_hits = scan_source_for_mcp_configs(&entry.path);
+            for (file, line_hint, mcp_topic, mcp_url) in &mcp_hits {
+                // Try to resolve the MCP topic to a service with matching routes
+                let target_svc = topic_to_service
+                    .get(mcp_topic.as_str())
+                    .cloned()
+                    // Fallback: if the URL contains a known env var pattern like
+                    // ${ASCEND_SVC_URL}, map it to the service
+                    .or_else(|| {
+                        // Extract env var name from ${...} patterns in the URL
+                        if let Some(start) = mcp_url.find("${") {
+                            if let Some(end) = mcp_url[start..].find('}') {
+                                let var_name = &mcp_url[start + 2..start + end];
+                                // Normalize: ASCEND_SVC_URL → ["ascend", "svc", "url"]
+                                let parts: Vec<&str> = var_name
+                                    .split('_')
+                                    .map(|s| s.trim())
+                                    .filter(|s| !s.is_empty())
+                                    .collect();
+                                // Remove common suffixes and expand abbreviations
+                                let meaningful: Vec<String> = parts
+                                    .iter()
+                                    .filter(|p| {
+                                        !["URL", "HOST", "PORT", "BASE", "ADDR"]
+                                            .contains(&p.to_ascii_uppercase().as_str())
+                                    })
+                                    .map(|p| {
+                                        let lower = p.to_ascii_lowercase();
+                                        if lower == "svc" {
+                                            "service".to_string()
+                                        } else {
+                                            lower
+                                        }
+                                    })
+                                    .collect();
+                                for svc_name in group.repos.iter() {
+                                    let svc_parts: Vec<&str> = svc_name.split('-').collect();
+                                    // Check if meaningful env var parts are a subset of svc name parts
+                                    // ASCEND_SVC → ["ascend", "svc"], ascend-service → ["ascend", "service"]
+                                    // "svc" matches "service" prefix
+                                    let matches = meaningful.iter().all(|mp| {
+                                        svc_parts.iter().any(|sp| {
+                                            sp.starts_with(mp.as_str()) || mp.starts_with(*sp)
+                                        })
+                                    });
+                                    if matches && !meaningful.is_empty() {
+                                        return Some(svc_name.clone());
+                                    }
+                                }
+                            }
+                        }
+                        None
+                    });
+
+                if let Some(ref target) = target_svc {
+                    if target != repo_name {
+                        // Resolve symbol from line hint
+                        let caller_id = format!("{}:{}", file, line_hint);
+                        deps.push(CrossServiceDep {
+                            caller_service: repo_name.clone(),
+                            caller_file: file.clone(),
+                            caller_symbol: caller_id,
+                            target_service: target.clone(),
+                            target_method: "McpConfig".to_string(),
+                            target_path: format!("/v1/mcp/{}/", mcp_topic),
+                            url_found: mcp_url.clone(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Dedup: keep first occurrence per (caller_service, caller_symbol, target_service, target_path).
     // caller_symbol is in the key so the class-level def-site edge AND the method-level
     // reference-site edge (from credit_constant_references) both survive — a route can
     // legitimately be reached from both the aggregating class and each calling method.
-    let mut seen: HashSet<(String, String, String)> = HashSet::new();
+    // target_service is in the key so SharedContract/SharedPackage deps to different
+    // services from the same caller aren't collapsed.
+    let mut seen: HashSet<(String, String, String, String)> = HashSet::new();
     deps.retain(|d| {
         seen.insert((
             d.caller_service.clone(),
             d.caller_symbol.clone(),
+            d.target_service.clone(),
             d.target_path.clone(),
         ))
     });
@@ -739,6 +990,69 @@ fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
+/// Detect lines where a URL string appears in a non-call context (skip lists,
+/// config defaults, route sets) rather than an actual HTTP fetch.
+fn is_non_call_context(line: &str) -> bool {
+    let trimmed = line.trim();
+    let upper = trimmed.to_ascii_uppercase();
+    // Set/frozenset/tuple literal assignments with skip/exclude/allow semantics
+    for kw in [
+        "SKIP",
+        "EXCLUDE",
+        "WHITELIST",
+        "BLACKLIST",
+        "ALLOWED",
+        "IGNORED",
+    ] {
+        if upper.contains(kw) {
+            return true;
+        }
+    }
+    // Bare set element (line is just a quoted string with trailing comma inside a set literal)
+    if (trimmed.starts_with('"') || trimmed.starts_with('\''))
+        && trimmed.ends_with(',')
+        && trimmed.matches('"').count() == 2
+    {
+        return true;
+    }
+    // Config/settings class attribute with external URL default
+    if (trimmed.contains("str =") || trimmed.contains("str="))
+        && (trimmed.contains("http://") || trimmed.contains("https://"))
+    {
+        return true;
+    }
+    // Router prefix definition: APIRouter(prefix="/v1/...")
+    if upper.contains("ROUTER") && trimmed.contains("prefix=") {
+        return true;
+    }
+    false
+}
+
+/// Detect route decorator lines that define endpoints, not consume them.
+/// Matches: @app.get("/..."), @router.post("/..."), @app.route("/..."), etc.
+fn is_route_decorator(line: &str) -> bool {
+    let trimmed = line.trim();
+    if !trimmed.starts_with('@') {
+        return false;
+    }
+    let after_at = &trimmed[1..];
+    for prefix in ["app.", "router.", "blueprint."] {
+        if let Some(rest) = after_at.strip_prefix(prefix) {
+            if rest.starts_with("get(")
+                || rest.starts_with("post(")
+                || rest.starts_with("put(")
+                || rest.starts_with("delete(")
+                || rest.starts_with("patch(")
+                || rest.starts_with("route(")
+                || rest.starts_with("api_route(")
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn walk_for_urls(
     base: &Path,
     dir: &Path,
@@ -773,6 +1087,9 @@ fn walk_for_urls(
                 Err(_) => continue,
             };
             for (line_num, line) in content.lines().enumerate() {
+                if is_route_decorator(line) || is_non_call_context(line) {
+                    continue;
+                }
                 for delim in ['"', '\'', '`'] {
                     for part in line.split(delim) {
                         let trimmed = part.trim();
@@ -836,11 +1153,86 @@ fn extract_constant_name(line: &str, _path: &str) -> Option<String> {
     None
 }
 
+/// Scan source files for /openapi.json or /swagger.json fetch references.
+/// Returns (file, line_hint, spec_path).
+fn scan_source_for_spec_fetches(root: &Path) -> Vec<(String, String, String)> {
+    const SKIP_DIRS: &[&str] = &[
+        ".infigraph",
+        ".git",
+        "node_modules",
+        "target",
+        "build",
+        "dist",
+        "__pycache__",
+        ".venv",
+    ];
+    let mut results = Vec::new();
+    walk_for_spec_fetches(root, root, SKIP_DIRS, &mut results);
+    results
+}
+
+fn walk_for_spec_fetches(
+    base: &Path,
+    dir: &Path,
+    skip: &[&str],
+    results: &mut Vec<(String, String, String)>,
+) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if path.is_dir() {
+            if !skip.contains(&name_str.as_ref()) && !name_str.starts_with('.') {
+                walk_for_spec_fetches(base, &path, skip, results);
+            }
+        } else if path.is_file() {
+            let rel = path
+                .strip_prefix(base)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if is_test_or_doc_file(&rel) {
+                continue;
+            }
+            let content = match std::fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            for (line_num, line) in content.lines().enumerate() {
+                if is_route_decorator(line) || is_non_call_context(line) {
+                    continue;
+                }
+                for delim in ['"', '\'', '`'] {
+                    for part in line.split(delim) {
+                        let trimmed = part.trim();
+                        let stripped = strip_fstring_prefix(trimmed);
+                        if (stripped == "/openapi.json" || stripped == "/swagger.json")
+                            && trimmed != stripped
+                        {
+                            // trimmed != stripped means an f-string prefix was present,
+                            // indicating URL construction (fetch), not a bare config value.
+                            results.push((
+                                rel.clone(),
+                                format!("line:{}", line_num + 1),
+                                stripped.to_string(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Scan source files for string literals matching any known contract path.
 /// Returns (file, line_hint, matched_path, target_service, target_method).
 fn scan_source_for_contracts(
     root: &Path,
-    route_lookup: &HashMap<String, (String, String)>,
+    route_lookup: &HashMap<String, Vec<(String, String)>>,
     wildcard_methods: &HashMap<String, (String, Vec<String>)>,
     caller_repo: &str,
 ) -> Vec<(String, String, String, String, String)> {
@@ -874,7 +1266,7 @@ fn walk_for_contracts(
     base: &Path,
     dir: &Path,
     skip: &[&str],
-    route_lookup: &HashMap<String, (String, String)>,
+    route_lookup: &HashMap<String, Vec<(String, String)>>,
     wildcard_methods: &HashMap<String, (String, Vec<String>)>,
     caller_repo: &str,
     results: &mut Vec<(String, String, String, String, String)>,
@@ -914,6 +1306,9 @@ fn walk_for_contracts(
                 Err(_) => continue,
             };
             for (line_num, line) in content.lines().enumerate() {
+                if is_route_decorator(line) || is_non_call_context(line) {
+                    continue;
+                }
                 for delim in ['"', '\'', '`'] {
                     for part in line.split(delim) {
                         let trimmed = part.trim();
@@ -925,9 +1320,12 @@ fn walk_for_contracts(
                         {
                             let normalized = normalize_route_path(stripped);
                             let consumer_method = extract_http_method_from_line(line);
-                            // Exact match first
-                            let hit = if let Some((svc, method)) = route_lookup.get(&normalized) {
-                                Some((svc.clone(), method.clone()))
+                            // Exact match first — prefer a different service
+                            let hit = if let Some(entries) = route_lookup.get(&normalized) {
+                                entries
+                                    .iter()
+                                    .find(|(svc, _)| svc != caller_repo)
+                                    .map(|(svc, method)| (svc.clone(), method.clone()))
                             } else {
                                 // Wildcard fallback with proper method resolution
                                 let wc = format!("{}/*", normalized);
@@ -1046,6 +1444,127 @@ fn walk_for_imports(
             }
         }
     }
+}
+
+/// Scan YAML config files for MCP server URL declarations.
+/// Returns (file, line_hint, mcp_topic, raw_url).
+/// Matches patterns like:
+///   mcp_servers:
+///     - name: qb_reports
+///       url: ${ASCEND_SVC_URL}/v1/mcp/qb-reports/
+fn scan_source_for_mcp_configs(root: &Path) -> Vec<(String, String, String, String)> {
+    const SKIP_DIRS: &[&str] = &[
+        ".infigraph",
+        ".git",
+        "node_modules",
+        "target",
+        "build",
+        "dist",
+        "__pycache__",
+        ".venv",
+    ];
+    let mut results = Vec::new();
+    walk_for_mcp_configs(root, root, SKIP_DIRS, &mut results);
+    results
+}
+
+fn walk_for_mcp_configs(
+    base: &Path,
+    dir: &Path,
+    skip: &[&str],
+    results: &mut Vec<(String, String, String, String)>,
+) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if path.is_dir() {
+            if !skip.contains(&name_str.as_ref()) && !name_str.starts_with('.') {
+                walk_for_mcp_configs(base, &path, skip, results);
+            }
+        } else if path.is_file() && (name_str.ends_with(".yaml") || name_str.ends_with(".yml")) {
+            let rel = path
+                .strip_prefix(base)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if is_test_or_doc_file(&rel) {
+                continue;
+            }
+            let content = match std::fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            // Simple state machine: detect mcp_servers blocks and extract url entries
+            let mut in_mcp_servers = false;
+            let mut current_name: Option<String> = None;
+            for (line_num, line) in content.lines().enumerate() {
+                let trimmed = line.trim();
+                // Detect start of mcp_servers list
+                if trimmed == "mcp_servers:" || trimmed.starts_with("mcp_servers:") {
+                    in_mcp_servers = true;
+                    current_name = None;
+                    continue;
+                }
+                if in_mcp_servers {
+                    // End of mcp_servers block: unindented non-empty line without leading dash/space
+                    if !trimmed.is_empty()
+                        && !line.starts_with(' ')
+                        && !line.starts_with('\t')
+                        && !trimmed.starts_with('-')
+                        && !trimmed.starts_with('#')
+                    {
+                        in_mcp_servers = false;
+                        current_name = None;
+                        continue;
+                    }
+                    // Extract name field
+                    if trimmed.starts_with("- name:") || trimmed.starts_with("name:") {
+                        let val = trimmed.split(':').nth(1).map(|s| s.trim().to_string());
+                        current_name = val;
+                    }
+                    // Extract url field — contains the MCP server URL
+                    if trimmed.starts_with("url:") {
+                        if let Some(url_val) = trimmed.strip_prefix("url:") {
+                            let url = url_val.trim().to_string();
+                            // Extract topic from URL: .../v1/mcp/<topic>/
+                            let topic = extract_mcp_topic_from_url(&url)
+                                .or_else(|| current_name.clone())
+                                .unwrap_or_default();
+                            if !topic.is_empty() {
+                                results.push((
+                                    rel.clone(),
+                                    format!("line:{}", line_num + 1),
+                                    topic,
+                                    url,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Extract the MCP topic name from a URL like `${ASCEND_SVC_URL}/v1/mcp/qb-reports/`.
+fn extract_mcp_topic_from_url(url: &str) -> Option<String> {
+    // Find /v1/mcp/<topic>/ or /mcp/<topic>/
+    let patterns = ["/v1/mcp/", "/mcp/"];
+    for pat in &patterns {
+        if let Some(idx) = url.find(pat) {
+            let after = &url[idx + pat.len()..];
+            let topic = after.trim_end_matches('/').split('/').next()?;
+            if !topic.is_empty() && !topic.starts_with('$') {
+                return Some(topic.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Detect cross-repo package dependencies within a group.
@@ -1305,7 +1824,7 @@ VERSION = "v1.2.3"
         let mut route_lookup = HashMap::new();
         route_lookup.insert(
             "/health/ready".to_string(),
-            ("svc-a".to_string(), "GET".to_string()),
+            vec![("svc-a".to_string(), "GET".to_string())],
         );
         let wc = HashMap::new();
         let results = scan_source_for_contracts(dir.path(), &route_lookup, &wc, "svc-b");
@@ -1330,7 +1849,7 @@ VERSION = "v1.2.3"
         let mut route_lookup = HashMap::new();
         route_lookup.insert(
             "/health/ready".to_string(),
-            ("svc-a".to_string(), "GET".to_string()),
+            vec![("svc-a".to_string(), "GET".to_string())],
         );
         let wc = HashMap::new();
         let results = scan_source_for_contracts(dir.path(), &route_lookup, &wc, "svc-a");
@@ -1410,6 +1929,33 @@ VERSION = "v1.2.3"
     }
 
     #[test]
+    fn test_scan_mcp_config() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("agents.yaml"),
+            "labrador:\n  mcp_servers:\n    - name: qb_reports\n      url: ${ASCEND_SVC_URL}/v1/mcp/qb-reports/\n    - name: wiki\n      url: ${ASCEND_SVC_URL}/v1/mcp/wiki/\n",
+        )
+        .unwrap();
+        let results = scan_source_for_mcp_configs(dir.path());
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].2, "qb-reports");
+        assert_eq!(results[1].2, "wiki");
+    }
+
+    #[test]
+    fn test_extract_mcp_topic_from_url() {
+        assert_eq!(
+            extract_mcp_topic_from_url("${ASCEND_SVC_URL}/v1/mcp/qb-reports/"),
+            Some("qb-reports".to_string())
+        );
+        assert_eq!(
+            extract_mcp_topic_from_url("http://localhost/v1/mcp/wiki/"),
+            Some("wiki".to_string())
+        );
+        assert_eq!(extract_mcp_topic_from_url("http://localhost/v1/api/"), None);
+    }
+
+    #[test]
     fn test_is_test_or_doc_file() {
         assert!(is_test_or_doc_file("tests/unit/test_client.py"));
         assert!(is_test_or_doc_file("test_something.py"));
@@ -1453,7 +1999,7 @@ VERSION = "v1.2.3"
         let mut route_lookup = HashMap::new();
         route_lookup.insert(
             "/health/ready".to_string(),
-            ("svc-a".to_string(), "GET".to_string()),
+            vec![("svc-a".to_string(), "GET".to_string())],
         );
         let wc = HashMap::new();
         let results = scan_source_for_contracts(dir.path(), &route_lookup, &wc, "svc-b");
@@ -1562,5 +2108,67 @@ VERSION = "v1.2.3"
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].2, "/v1/customers");
         assert_eq!(results[0].3, Some("GET".to_string()));
+    }
+
+    #[test]
+    fn test_is_route_decorator() {
+        assert!(is_route_decorator("@router.post(\"/v1/langfuse/relay\")"));
+        assert!(is_route_decorator("  @app.get(\"/v1/items\")"));
+        assert!(is_route_decorator("@blueprint.delete(\"/v1/users/{id}\")"));
+        assert!(is_route_decorator("@app.api_route(\"/v1/proxy\")"));
+        assert!(!is_route_decorator("resp = requests.post(url)"));
+        assert!(!is_route_decorator("ROUTES = {\"/v1/langfuse/relay\"}"));
+        assert!(!is_route_decorator("# @router.post(\"/v1/x\")"));
+    }
+
+    #[test]
+    fn test_is_non_call_context() {
+        assert!(is_non_call_context("    \"/v1/langfuse/relay\","));
+        assert!(is_non_call_context("_SKIP_PATHS = {\"/v1/foo\"}"));
+        assert!(is_non_call_context("EXCLUDED_ROUTES = [\"/v1/bar\"]"));
+        assert!(is_non_call_context(
+            "    oinp_base_url: str = \"https://example.com/v1/events\""
+        ));
+        assert!(is_non_call_context(
+            "router = APIRouter(prefix=\"/v1/labrador\")"
+        ));
+        assert!(!is_non_call_context(
+            "resp = requests.get(f\"{url}/v1/items\")"
+        ));
+        assert!(!is_non_call_context(
+            "return f\"{base_url}/v1/langfuse/relay\""
+        ));
+    }
+
+    #[test]
+    fn test_scan_source_skips_non_call_context() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("config.py"),
+            "_SKIP_PATHS = {\n    \"/v1/documents\",\n    \"/v1/estimates\",\n}\n",
+        )
+        .unwrap();
+        let results = scan_source_for_urls(dir.path());
+        assert!(
+            results.is_empty(),
+            "skip-list URLs should not be detected, got {:?}",
+            results
+        );
+    }
+
+    #[test]
+    fn test_scan_source_skips_decorators() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("routes.py"),
+            "@router.post(\"/v1/langfuse/relay\")\nasync def relay_traces(request):\n    pass\n",
+        )
+        .unwrap();
+        let results = scan_source_for_urls(dir.path());
+        assert!(
+            results.is_empty(),
+            "decorator URL should not be detected as consumer call, got {:?}",
+            results
+        );
     }
 }
