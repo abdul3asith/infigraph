@@ -10,6 +10,17 @@ const DEFAULT_TOKEN_BUDGET: usize = 150_000;
 
 static SESSION: Mutex<Option<SessionContext>> = Mutex::new(None);
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only: panic at start of apply_seen_dedup (after compress in the pipeline).
+    static FORCE_DEDUP_PANIC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub fn force_dedup_panic(enabled: bool) {
+    FORCE_DEDUP_PANIC.with(|c| c.set(enabled));
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct ConfigFile {
     #[serde(default)]
@@ -137,6 +148,10 @@ struct ToolCallStats {
     detail_requests: usize,
 }
 
+struct FocusEntry {
+    call_seen: usize,
+}
+
 struct SessionContext {
     seen: HashMap<String, SeenEntry>,
     prior_hashes: HashMap<String, u64>,
@@ -147,6 +162,12 @@ struct SessionContext {
     config: CompressionConfig,
     tool_stats: HashMap<String, ToolCallStats>,
     persist_counter: usize,
+    /// Symbols/files recently fetched for editing — never compress these.
+    focus: HashMap<String, FocusEntry>,
+    /// Advances on every tool call — ages focus entries independently of dedup.
+    focus_clock: usize,
+    /// Compress/dedup panics recovered via catch_unwind (task 2.9).
+    compress_failures: usize,
 }
 
 impl SessionContext {
@@ -169,6 +190,9 @@ impl SessionContext {
             config: cfg,
             tool_stats: HashMap::new(),
             persist_counter: 0,
+            focus: HashMap::new(),
+            focus_clock: 0,
+            compress_failures: 0,
         }
     }
 
@@ -279,6 +303,16 @@ pub fn track_tokens(tokens: usize) -> CompressionLevel {
 /// Apply seen-dedup to already-compressed tool output.
 /// Returns the output unchanged if dedup is disabled or content is fresh.
 pub fn apply_seen_dedup(compressed: &str, tool_name: &str, args: &Value) -> String {
+    #[cfg(test)]
+    if FORCE_DEDUP_PANIC.with(|c| c.get()) {
+        panic!("forced dedup panic");
+    }
+
+    // Focused edit targets must keep full text (task 3.3) — skip dedup placeholders.
+    if is_in_focus(args) {
+        return compressed.to_string();
+    }
+
     let env_dedup = std::env::var("INFIGRAPH_DEDUP").ok().map(|v| v != "0");
     let config_dedup = {
         let guard = SESSION.lock().unwrap_or_else(|e| e.into_inner());
@@ -403,6 +437,93 @@ pub fn record_tool_call(tool_name: &str, detail_requested: bool) {
     if detail_requested {
         entry.detail_requests += 1;
     }
+    ctx.focus_clock += 1;
+}
+
+/// Mark symbols/files as in-focus when the agent fetches them for editing (task 3.3).
+/// Sources: `get_code_snippet`, or `get_doc_context` with `for_edit=true`.
+pub fn record_focus(tool_name: &str, args: &Value) {
+    let track = match tool_name {
+        "get_code_snippet" => true,
+        "get_doc_context" => args
+            .get("for_edit")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        _ => false,
+    };
+    if !track {
+        return;
+    }
+    let mut keys = Vec::new();
+    if let Some(id) = args.get("symbol_id").and_then(|v| v.as_str()) {
+        keys.push(id.to_string());
+        if let Some((file, _)) = id.split_once("::") {
+            keys.push(file.to_string());
+        }
+    }
+    if let Some(sym) = args.get("symbol").and_then(|v| v.as_str()) {
+        keys.push(sym.to_string());
+    }
+    if let Some(file) = args.get("file").and_then(|v| v.as_str()) {
+        keys.push(file.to_string());
+    }
+    if keys.is_empty() {
+        return;
+    }
+    let mut guard = SESSION.lock().unwrap_or_else(|e| e.into_inner());
+    let ctx = guard.get_or_insert_with(SessionContext::new);
+    let call = ctx.focus_clock;
+    let window = ctx.staleness_window;
+    ctx.focus
+        .retain(|_, e| call.saturating_sub(e.call_seen) <= window);
+    for key in keys {
+        ctx.focus.insert(key, FocusEntry { call_seen: call });
+    }
+}
+
+/// True if args refer to a recently focused symbol/file (within staleness window).
+pub fn is_in_focus(args: &Value) -> bool {
+    // Only structured identity args — not free-text `query` (would false-positive on search).
+    let candidates: Vec<&str> = [
+        args.get("symbol_id").and_then(|v| v.as_str()),
+        args.get("symbol").and_then(|v| v.as_str()),
+        args.get("file").and_then(|v| v.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if candidates.is_empty() {
+        return false;
+    }
+    let guard = SESSION.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(ctx) = guard.as_ref() else {
+        return false;
+    };
+    for cand in candidates {
+        if focus_hit(ctx, cand) {
+            return true;
+        }
+        if let Some((file, _)) = cand.split_once("::") {
+            if focus_hit(ctx, file) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn focus_hit(ctx: &SessionContext, key: &str) -> bool {
+    let Some(entry) = ctx.focus.get(key) else {
+        return false;
+    };
+    ctx.focus_clock.saturating_sub(entry.call_seen) <= ctx.staleness_window
+}
+
+/// Record a recovered compress/dedup panic (task 2.9).
+pub fn record_compress_failure() {
+    let mut guard = SESSION.lock().unwrap_or_else(|e| e.into_inner());
+    let ctx = guard.get_or_insert_with(SessionContext::new);
+    ctx.compress_failures += 1;
 }
 
 /// Check if a tool's detail-request rate exceeds 30%, suggesting compression is too aggressive.
@@ -447,8 +568,12 @@ pub fn get_compression_stats() -> String {
     };
     let dedup_entries = ctx.seen.len();
     let mut out = format!(
-        "Compression Stats (current session):\n  Level: {level}\n  Token budget: {}\n  Tokens sent: {}\n  Budget remaining: {remaining_pct}%\n  Tool calls tracked: {}\n  Dedup entries: {dedup_entries}",
-        ctx.token_budget, ctx.total_tokens_sent, ctx.call_counter,
+        "Compression Stats (current session):\n  Level: {level}\n  Token budget: {}\n  Tokens sent: {}\n  Budget remaining: {remaining_pct}%\n  Tool calls tracked: {}\n  Dedup entries: {dedup_entries}\n  Focus entries: {}\n  Compress failures: {}",
+        ctx.token_budget,
+        ctx.total_tokens_sent,
+        ctx.call_counter,
+        ctx.focus.len(),
+        ctx.compress_failures,
     );
     if !ctx.tool_stats.is_empty() {
         out.push_str("\n  Detail-request rates:");
@@ -485,15 +610,47 @@ pub fn reset_session() {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::MutexGuard;
 
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
-    fn setup() -> std::sync::MutexGuard<'static, ()> {
-        let guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        reset_session();
+    /// Isolates tests from the real repo / home config and dedup_state.json.
+    struct TestEnv {
+        _lock: MutexGuard<'static, ()>,
+        _tmpdir: tempfile::TempDir,
+        orig_cwd: PathBuf,
+    }
+
+    impl Drop for TestEnv {
+        fn drop(&mut self) {
+            reset_session();
+            force_dedup_panic(false);
+            let _ = std::env::set_current_dir(&self.orig_cwd);
+        }
+    }
+
+    fn setup() -> TestEnv {
+        let lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmpdir = tempfile::tempdir().unwrap();
+        let ig = tmpdir.path().join(".infigraph");
+        std::fs::create_dir_all(&ig).unwrap();
+        // Shadow walk-up + ~/.infigraph/config.toml (e.g. level=summary).
+        // No `level` → auto_level; no dedup_state.json → empty prior_hashes.
+        std::fs::write(ig.join("config.toml"), "[compression]\n").unwrap();
+
+        let orig_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
         std::env::set_var("INFIGRAPH_DEDUP", "1");
         std::env::remove_var("INFIGRAPH_TOKEN_BUDGET");
-        guard
+        std::env::remove_var("INFIGRAPH_COMPRESSION_LEVEL");
+        force_dedup_panic(false);
+        reset_session();
+
+        TestEnv {
+            _lock: lock,
+            _tmpdir: tmpdir,
+            orig_cwd,
+        }
     }
 
     fn big_output() -> String {
@@ -798,5 +955,171 @@ mod tests {
 
         // Restore cwd
         std::env::set_current_dir(orig_dir).unwrap();
+    }
+
+    // --- Task 3.3: Focus tracking ---
+
+    #[test]
+    fn test_focus_from_code_snippet_bypasses_matching_symbol() {
+        let _g = setup();
+        record_tool_call("get_code_snippet", false);
+        record_focus(
+            "get_code_snippet",
+            &json!({"symbol_id": "src/auth.rs::login"}),
+        );
+        assert!(is_in_focus(&json!({"symbol_id": "src/auth.rs::login"})));
+        assert!(is_in_focus(&json!({"symbol_id": "src/auth.rs::logout"}))); // same file
+        assert!(!is_in_focus(&json!({"symbol_id": "src/other.rs::foo"})));
+    }
+
+    #[test]
+    fn test_focus_from_symbol_only_arg() {
+        let _g = setup();
+        record_tool_call("get_code_snippet", false);
+        record_focus("get_code_snippet", &json!({"symbol": "authenticate"}));
+        assert!(is_in_focus(&json!({"symbol": "authenticate"})));
+        assert!(!is_in_focus(&json!({"symbol": "other"})));
+    }
+
+    #[test]
+    fn test_focus_from_file_only_arg() {
+        let _g = setup();
+        record_tool_call("get_code_snippet", false);
+        record_focus("get_code_snippet", &json!({"file": "src/auth.rs"}));
+        assert!(is_in_focus(&json!({"file": "src/auth.rs"})));
+        assert!(!is_in_focus(&json!({"file": "src/other.rs"})));
+    }
+
+    #[test]
+    fn test_focus_from_bare_symbol_id_without_path() {
+        let _g = setup();
+        record_tool_call("get_code_snippet", false);
+        record_focus("get_code_snippet", &json!({"symbol_id": "login"}));
+        assert!(is_in_focus(&json!({"symbol_id": "login"})));
+        // No "::" → no derived file-path key. Flat key space still matches
+        // file:"login" (same string); unrelated paths stay cold.
+        assert!(is_in_focus(&json!({"file": "login"})));
+        assert!(!is_in_focus(&json!({"file": "src/auth.rs"})));
+        assert!(!is_in_focus(&json!({"symbol_id": "src/auth.rs::login"})));
+    }
+
+    #[test]
+    fn test_focus_ignores_unrelated_tools() {
+        let _g = setup();
+        record_tool_call("search", false);
+        record_focus("search", &json!({"symbol_id": "src/auth.rs::login"}));
+        assert!(!is_in_focus(&json!({"symbol_id": "src/auth.rs::login"})));
+    }
+
+    #[test]
+    fn test_focus_requires_for_edit_on_doc_context() {
+        let _g = setup();
+        record_tool_call("get_doc_context", false);
+        record_focus(
+            "get_doc_context",
+            &json!({"symbol_id": "src/auth.rs::login", "for_edit": false}),
+        );
+        assert!(!is_in_focus(&json!({"symbol_id": "src/auth.rs::login"})));
+
+        record_tool_call("get_doc_context", false);
+        record_focus(
+            "get_doc_context",
+            &json!({"symbol_id": "src/auth.rs::login", "for_edit": true}),
+        );
+        assert!(is_in_focus(&json!({"symbol_id": "src/auth.rs::login"})));
+    }
+
+    #[test]
+    fn test_focus_ages_out_after_staleness_window() {
+        let _g = setup();
+        record_tool_call("get_code_snippet", false);
+        record_focus(
+            "get_code_snippet",
+            &json!({"symbol_id": "src/auth.rs::login"}),
+        );
+        assert!(is_in_focus(&json!({"symbol_id": "src/auth.rs::login"})));
+
+        // Advance focus_clock past default staleness window (6)
+        for _ in 0..7 {
+            record_tool_call("search", false);
+        }
+        assert!(!is_in_focus(&json!({"symbol_id": "src/auth.rs::login"})));
+    }
+
+    #[test]
+    fn test_focus_ignores_free_text_query() {
+        let _g = setup();
+        record_tool_call("get_code_snippet", false);
+        record_focus(
+            "get_code_snippet",
+            &json!({"symbol_id": "src/auth.rs::login"}),
+        );
+        // Exact path as search query must NOT trip focus (would disable search compression)
+        assert!(!is_in_focus(&json!({"query": "src/auth.rs"})));
+        assert!(!is_in_focus(&json!({"query": "src/auth.rs::login"})));
+        assert!(is_in_focus(&json!({"symbol_id": "src/auth.rs::login"})));
+    }
+
+    #[test]
+    fn test_focus_prune_removes_expired_entries() {
+        let _g = setup();
+        record_tool_call("get_code_snippet", false);
+        record_focus("get_code_snippet", &json!({"symbol_id": "src/old.rs::a"}));
+        for _ in 0..7 {
+            record_tool_call("search", false);
+        }
+        // Recording new focus should prune expired keys from the map
+        record_tool_call("get_code_snippet", false);
+        record_focus("get_code_snippet", &json!({"symbol_id": "src/new.rs::b"}));
+        let stats = get_compression_stats();
+        // Only the fresh focus remains (symbol + file = 2 keys)
+        assert!(
+            stats.contains("Focus entries: 2"),
+            "expected pruned focus map with 2 entries, got: {stats}"
+        );
+        assert!(!is_in_focus(&json!({"symbol_id": "src/old.rs::a"})));
+        assert!(is_in_focus(&json!({"symbol_id": "src/new.rs::b"})));
+    }
+
+    #[test]
+    fn test_config_level_used_for_metrics_not_auto_level() {
+        let _g = setup();
+        // High budget remaining → auto_level is Off, but config Summary must win
+        let dir = tempfile::tempdir().unwrap();
+        let ig = dir.path().join(".infigraph");
+        std::fs::create_dir_all(&ig).unwrap();
+        std::fs::write(
+            ig.join("config.toml"),
+            "[compression]\nlevel = \"summary\"\n",
+        )
+        .unwrap();
+        let orig = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        reset_session();
+        std::env::remove_var("INFIGRAPH_COMPRESSION_LEVEL");
+        std::env::remove_var("INFIGRAPH_TOKEN_BUDGET");
+
+        let level = get_compression_level();
+        let auto = track_tokens(0); // still ~100% budget → Off
+        assert_eq!(level, CompressionLevel::Summary);
+        assert_eq!(auto, CompressionLevel::Off);
+        // Metrics must log `level` (Summary), not `auto` (Off)
+
+        std::env::set_current_dir(orig).unwrap();
+    }
+
+    // --- Task 2.9: Compress failure health ---
+
+    #[test]
+    fn test_record_compress_failure_shows_in_stats() {
+        let _g = setup();
+        record_tool_call("search", false);
+        record_compress_failure();
+        record_compress_failure();
+        let stats = get_compression_stats();
+        assert!(
+            stats.contains("Compress failures: 2"),
+            "expected failure count in stats, got: {stats}"
+        );
     }
 }

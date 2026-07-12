@@ -45,9 +45,25 @@ impl DocIndex {
     }
 
     pub fn init(&mut self) -> Result<()> {
-        let store = DocStore::open(&self.db_path)?;
-        self.store = Some(store);
-        Ok(())
+        match DocStore::open(&self.db_path) {
+            Ok(store) => {
+                self.store = Some(store);
+                Ok(())
+            }
+            Err(first_err) => {
+                // Corrupt / unreadable docs.kuzu — wipe and rebuild like code graph crash recovery.
+                eprintln!(
+                    "[docs] open failed ({first_err}), wiping corrupt doc index and rebuilding..."
+                );
+                self.clean()?;
+                let store = DocStore::open(&self.db_path).with_context(|| {
+                    format!("docs kuzu still unreadable after wipe (was: {first_err})")
+                })?;
+                self.store = Some(store);
+                self.index()?;
+                Ok(())
+            }
+        }
     }
 
     pub fn store(&self) -> Option<&DocStore> {

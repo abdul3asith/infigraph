@@ -266,9 +266,10 @@ Built into `crates/infigraph-mcp/` as response middleware in `dispatch_tool`. No
 ### Task 2.8: Smart detail prefetch ⏭️ DEFERRED
 - Not needed — detail=true is cheap and explicit
 
-### Task 2.9: Compression failure fallback ⏭️ DEFERRED
+### Task 2.9: Compression failure fallback ✅
 - Compressors already fall through to raw on parse failure (pattern match returns raw.to_string())
-- Formal catch_unwind + health monitoring deferred to Phase 8
+- `catch_unwind` around compress+dedup in `handle_tools_call`; panic → log, `record_compress_failure()`, return raw
+- `get_compression_stats` reports `Compress failures` count
 
 ### Deliverable ✅
 - 4 compressors: search, get_doc_context, find_all_references, get_architecture
@@ -299,12 +300,12 @@ Built into `crates/infigraph-mcp/` as response middleware in `dispatch_tool`. No
   - Seen > 10 turns ago → show full (may have scrolled out of context window)
 - [x] Configurable staleness threshold (set to 6 calls, not 10 — tight window bounds damage from stale dedup)
 
-### Task 3.3: Implement focus tracking ⏭️ DEPRIORITIZED
+### Task 3.3: Implement focus tracking ✅
 
-- [ ] Track which files/symbols the user is actively editing (based on `get_doc_context` with `for_edit=true`, or `get_code_snippet` calls)
-- [ ] Never compress content in the focus set
-- [ ] Compress more aggressively for content far from focus
-- **Note:** Mostly covered by existing mechanisms — `for_edit=true` bypasses compression, content-hash dedup shows full output when content changes. Residual value is marginal auto-bypass on non-edit calls to recently-edited symbols.
+- [x] Track files/symbols from `get_doc_context` with `for_edit=true` and `get_code_snippet`
+- [x] Never compress content in the focus set (`should_bypass` → `is_in_focus`)
+- [x] Focus ages out after staleness window (default 6 calls via `focus_clock`)
+- File path from `symbol_id` (`path::name`) is also tracked so sibling symbols in the same file stay uncompressed
 
 ### Task 3.4: Wire into compression middleware
 
@@ -351,7 +352,7 @@ Built into `crates/infigraph-mcp/` as response middleware in `dispatch_tool`. No
 - [x] Session context tracking with seen-dedup (session_context.rs, 8 tests)
 - [x] Phase 3 eval: 42.6% additional savings, 67% dedup rate, quality preserved
 - [x] LM2 session integration: cross-session dedup via persisted content hashes (3.7, 4 tests)
-- [ ] Focus-aware compression (deprioritized: 3.3 — mostly covered by for_edit + content-hash)
+- [x] Focus-aware compression (3.3 — `record_focus` / `is_in_focus` bypass)
 - [ ] Graph-aware context compaction (deferred: 3.6 — undetectable from MCP server)
 
 ---

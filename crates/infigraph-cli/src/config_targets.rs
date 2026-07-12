@@ -99,7 +99,7 @@ pub(crate) fn install_json_target(config_path: &std::path::Path, mcp_path_str: &
 
     config["mcpServers"]["infigraph"] = json!({
         "command": mcp_path_str,
-        "args": ["--ui", "--mcp", "--port=9749"]
+        "args": ["--mcp"]
     });
 
     let pretty = serde_json::to_string_pretty(&config)?;
@@ -118,7 +118,7 @@ pub(crate) fn install_toml_target(config_path: &std::path::Path, mcp_path_str: &
     };
 
     let mcp_block = format!(
-        "[mcp]\ninfigraph = {{ command = \"{}\", args = [\"--ui\", \"--mcp\", \"--port=9749\"] }}\n",
+        "[mcp]\ninfigraph = {{ command = \"{}\", args = [\"--mcp\"] }}\n",
         mcp_path_str
     );
 
@@ -226,4 +226,99 @@ pub(crate) fn uninstall_toml_target<'a>(
     }
 
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn read_json(path: &Path) -> serde_json::Value {
+        let content = std::fs::read_to_string(path).unwrap();
+        serde_json::from_str(&content).unwrap()
+    }
+
+    #[test]
+    fn install_json_only_mcp_arg() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("mcp.json");
+        install_json_target(&config, "/usr/bin/infigraph-mcp").unwrap();
+
+        let v = read_json(&config);
+        let args = v["mcpServers"]["infigraph"]["args"]
+            .as_array()
+            .expect("args should be array");
+        let args_str: Vec<&str> = args.iter().map(|a| a.as_str().unwrap()).collect();
+
+        assert_eq!(
+            args_str,
+            vec!["--mcp"],
+            "args must be exactly [\"--mcp\"], got {:?}",
+            args_str
+        );
+        assert!(
+            !args_str.contains(&"--ui") && !args_str.iter().any(|a| a.starts_with("--port")),
+            "must not contain --ui or --port flags"
+        );
+    }
+
+    #[test]
+    fn install_json_preserves_existing_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("mcp.json");
+        std::fs::write(
+            &config,
+            r#"{"mcpServers":{"other":{"command":"other"}},"foo":"bar"}"#,
+        )
+        .unwrap();
+
+        install_json_target(&config, "/usr/bin/infigraph-mcp").unwrap();
+
+        let v = read_json(&config);
+        assert_eq!(v["foo"], "bar");
+        assert!(v["mcpServers"]["other"].is_object());
+        assert_eq!(v["mcpServers"]["infigraph"]["args"][0], "--mcp");
+    }
+
+    #[test]
+    fn install_toml_only_mcp_arg() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        install_toml_target(&config, "/usr/bin/infigraph-mcp").unwrap();
+
+        let content = std::fs::read_to_string(&config).unwrap();
+        assert!(
+            content.contains(r#"args = ["--mcp"]"#),
+            "toml args must be [\"--mcp\"], got: {}",
+            content
+        );
+        assert!(!content.contains("--ui"), "must not contain --ui");
+        assert!(!content.contains("--port"), "must not contain --port");
+    }
+
+    #[test]
+    fn uninstall_json_removes_infigraph() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("mcp.json");
+        install_json_target(&config, "/usr/bin/infigraph-mcp").unwrap();
+
+        let result = uninstall_json_target(&config, "Test").unwrap();
+        assert_eq!(result, Some("Test"));
+
+        let v = read_json(&config);
+        assert!(v["mcpServers"]["infigraph"].is_null());
+    }
+
+    #[test]
+    fn uninstall_toml_removes_infigraph() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        install_toml_target(&config, "/usr/bin/infigraph-mcp").unwrap();
+
+        let result = uninstall_toml_target(&config, "Test").unwrap();
+        assert_eq!(result, Some("Test"));
+
+        let content = std::fs::read_to_string(&config).unwrap();
+        assert!(!content.contains("infigraph"));
+    }
 }

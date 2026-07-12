@@ -1,9 +1,48 @@
 #[cfg(feature = "kompress")]
 use crate::session_context::get_ml_compression_mode;
-use crate::session_context::CompressionLevel;
+use crate::session_context::{self, CompressionLevel};
 use serde_json::Value;
+use std::cell::Cell;
 
 const MIN_TOKENS_TO_COMPRESS: usize = 100;
+
+thread_local! {
+    /// Test-only: force compress_pipeline_safe to panic inside the catch_unwind boundary.
+    static FORCE_COMPRESS_PANIC: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Run compress + dedup, recovering to raw output on panic (task 2.9).
+pub fn compress_pipeline_safe(raw: &str, tool_name: &str, args: &Value) -> String {
+    let raw_owned = raw.to_string();
+    let tool = tool_name.to_string();
+    let args_c = args.clone();
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if FORCE_COMPRESS_PANIC.with(|c| c.get()) {
+            panic!("forced compress panic");
+        }
+        let c = compress_tool_output(&raw_owned, &tool, &args_c);
+        session_context::apply_seen_dedup(&c, &tool, &args_c)
+    })) {
+        Ok(c) => c,
+        Err(panic_info) => {
+            let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                (*s).to_string()
+            } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "unknown panic".to_string()
+            };
+            eprintln!("[compress] PANIC tool={tool_name}: {msg} — returning raw output");
+            session_context::record_compress_failure();
+            raw.to_string()
+        }
+    }
+}
+
+#[cfg(test)]
+pub fn force_compress_panic(enabled: bool) {
+    FORCE_COMPRESS_PANIC.with(|c| c.set(enabled));
+}
 
 static BYPASS_TOOLS: &[&str] = &[
     "get_code_snippet",
@@ -44,6 +83,7 @@ pub fn compress_tool_output_with_level(
         "detect_dead_code" => compress_dead_code(raw, args),
         "get_api_surface" => compress_api_surface(raw, args, effective),
         "git_summary" => compress_git_summary(raw, args),
+        "search_sessions" => compress_search_sessions(raw, args, effective),
         _ => raw.to_string(),
     }
 }
@@ -84,6 +124,9 @@ fn should_bypass(tool_name: &str, args: &Value, raw: &str) -> bool {
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
     {
+        return true;
+    }
+    if crate::session_context::is_in_focus(args) {
         return true;
     }
     let word_count = raw.split_whitespace().count();
@@ -685,6 +728,75 @@ fn compress_git_summary(raw: &str, _args: &Value) -> String {
     }
 
     out
+}
+
+/// Truncate bulky session markdown — Decisions pipes and Files Touched dominate tokens.
+fn compress_search_sessions(raw: &str, _args: &Value, level: CompressionLevel) -> String {
+    if !raw.starts_with("## Session Search:") {
+        return raw.to_string();
+    }
+    compress_session_markdown_fields(raw, level)
+}
+
+fn compress_session_markdown_fields(raw: &str, level: CompressionLevel) -> String {
+    let decision_budget = match level {
+        CompressionLevel::Off => return raw.to_string(),
+        CompressionLevel::Summary => 280,
+        CompressionLevel::Aggressive => 140,
+        CompressionLevel::Minimal => 0,
+    };
+    let keep_files = matches!(level, CompressionLevel::Summary);
+    let mut out = String::with_capacity(raw.len() / 2);
+
+    for line in raw.lines() {
+        if let Some(rest) = line.strip_prefix("**Decisions:** ") {
+            if decision_budget == 0 {
+                let n = 1 + rest.matches(" | Goal:").count();
+                out.push_str(&format!("**Decisions:** ({n} — see narrative)\n"));
+            } else {
+                out.push_str("**Decisions:** ");
+                out.push_str(&truncate_decisions_field(rest, decision_budget));
+                out.push('\n');
+            }
+            continue;
+        }
+        if line.starts_with("**Files Touched:**") {
+            if !keep_files {
+                continue;
+            }
+            if line.len() > 200 {
+                out.push_str(&line[..200]);
+                out.push_str("…\n");
+            } else {
+                out.push_str(line);
+                out.push('\n');
+            }
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+fn truncate_decisions_field(rest: &str, budget: usize) -> String {
+    let first = rest.split(" | Goal:").next().unwrap_or(rest);
+    let more = rest.matches(" | Goal:").count();
+    let body = if first.chars().count() > budget {
+        let end = first
+            .char_indices()
+            .nth(budget)
+            .map(|(i, _)| i)
+            .unwrap_or(first.len());
+        format!("{}…", &first[..end])
+    } else {
+        first.to_string()
+    };
+    if more > 0 {
+        format!("{body} (+{more} more)")
+    } else {
+        body
+    }
 }
 
 // --- Generic content compression (for `compress` MCP tool) ---
@@ -1666,6 +1778,135 @@ mod tests {
     }
 
     #[test]
+    fn test_bypass_in_focus_symbol() {
+        crate::session_context::reset_session();
+        crate::session_context::record_tool_call("get_code_snippet", false);
+        crate::session_context::record_focus(
+            "get_code_snippet",
+            &json!({"symbol_id": "src/auth.rs::login"}),
+        );
+        assert!(should_bypass(
+            "get_doc_context",
+            &json!({"symbol_id": "src/auth.rs::login"}),
+            "x ".repeat(200).as_str()
+        ));
+        assert!(!should_bypass(
+            "get_doc_context",
+            &json!({"symbol_id": "src/other.rs::foo"}),
+            "x ".repeat(200).as_str()
+        ));
+    }
+
+    #[test]
+    fn test_compress_pipeline_safe_recovers_from_panic() {
+        crate::session_context::reset_session();
+        let raw = "word ".repeat(200);
+        force_compress_panic(true);
+        let out = compress_pipeline_safe(&raw, "search", &json!({"query": "auth"}));
+        force_compress_panic(false);
+        assert_eq!(out, raw, "panic must fall back to raw");
+        let stats = crate::session_context::get_compression_stats();
+        assert!(
+            stats.contains("Compress failures: 1"),
+            "expected failure recorded, got: {stats}"
+        );
+    }
+
+    #[test]
+    fn test_compress_pipeline_safe_recovers_from_dedup_panic() {
+        crate::session_context::reset_session();
+        force_compress_panic(false);
+        // Large enough to pass compress bypass / reach dedup
+        let raw = format!(
+            "Search: 'auth' (2 symbol results, 0 text matches)\n\n0.9  Function login (src/a.rs:L1-2)\n0.8  Function logout (src/a.rs:L3-4)\n{}",
+            "extra word ".repeat(80)
+        );
+        crate::session_context::force_dedup_panic(true);
+        let out = compress_pipeline_safe(&raw, "search", &json!({"query": "auth"}));
+        crate::session_context::force_dedup_panic(false);
+        assert_eq!(out, raw, "dedup panic must fall back to original raw");
+        let stats = crate::session_context::get_compression_stats();
+        assert!(
+            stats.contains("Compress failures: 1"),
+            "expected failure recorded, got: {stats}"
+        );
+    }
+
+    #[test]
+    fn test_focus_bypasses_compression_on_large_doc_context() {
+        crate::session_context::reset_session();
+        // Config Summary so compression would otherwise run
+        let dir = tempfile::tempdir().unwrap();
+        let ig = dir.path().join(".infigraph");
+        std::fs::create_dir_all(&ig).unwrap();
+        std::fs::write(
+            ig.join("config.toml"),
+            "[compression]\nlevel = \"summary\"\n",
+        )
+        .unwrap();
+        let orig = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        crate::session_context::reset_session();
+
+        crate::session_context::record_tool_call("get_code_snippet", false);
+        crate::session_context::record_focus(
+            "get_code_snippet",
+            &json!({"symbol_id": "src/auth.rs::login"}),
+        );
+
+        // Fabricate a large get_doc_context-shaped payload
+        let raw = format!(
+            "## login\n\nFile: src/auth.rs\n\n```rust\n{}\n```\n\nCallers:\n- a\n- b\n",
+            "fn login() { /* body */ }\n".repeat(40)
+        );
+        let args = json!({"symbol_id": "src/auth.rs::login"});
+        let out = compress_tool_output_with_level(
+            &raw,
+            "get_doc_context",
+            &args,
+            CompressionLevel::Summary,
+        );
+        assert_eq!(out, raw, "focused symbol must not be compressed");
+
+        std::env::set_current_dir(orig).unwrap();
+    }
+
+    #[test]
+    fn test_focus_also_skips_dedup_placeholder() {
+        crate::session_context::reset_session();
+        std::env::set_var("INFIGRAPH_DEDUP", "1");
+        crate::session_context::record_tool_call("get_code_snippet", false);
+        crate::session_context::record_focus(
+            "get_code_snippet",
+            &json!({"symbol_id": "src/auth.rs::login"}),
+        );
+        let raw = "word ".repeat(100);
+        let args = json!({"symbol_id": "src/auth.rs::login"});
+        let first = crate::session_context::apply_seen_dedup(&raw, "get_doc_context", &args);
+        let second = crate::session_context::apply_seen_dedup(&raw, "get_doc_context", &args);
+        assert_eq!(first, raw);
+        assert_eq!(
+            second, raw,
+            "focused content must not become (seen …) placeholder"
+        );
+    }
+
+    #[test]
+    fn test_compress_pipeline_safe_normal_path() {
+        crate::session_context::reset_session();
+        force_compress_panic(false);
+        crate::session_context::record_tool_call("search", false);
+        let raw = "word ".repeat(5); // tiny → bypass, returns raw
+        let out = compress_pipeline_safe(&raw, "search", &json!({}));
+        assert_eq!(out, raw);
+        let stats = crate::session_context::get_compression_stats();
+        assert!(
+            stats.contains("Compress failures: 0"),
+            "no failure on success path: {stats}"
+        );
+    }
+
+    #[test]
     fn test_compress_search_strips_docstrings_and_grep() {
         let raw = r#"Search: 'auth login' (3 symbol results, 1 text matches)
 
@@ -1772,6 +2013,141 @@ Callees (3):
         let raw = "something unexpected";
         assert_eq!(
             compress_search(raw, &json!({}), CompressionLevel::Summary),
+            raw
+        );
+    }
+
+    #[test]
+    fn test_compress_search_sessions_truncates_decisions() {
+        let raw = r#"## Session Search: "compression"
+
+### named_foo — "foo" (relevance: 0.900, confidence: 0.90)
+
+**Summary:** Implemented 2.9 and 3.3.
+
+**Pending Tasks:** 1. Rebuild MCP
+
+**Decisions:** Goal: Track deferred. Decision: Added table. Why: Record. Invalidates-if: none. | Goal: Implement 2.9. Decision: catch_unwind. Why: Safe. Invalidates-if: none. | Goal: Focus. Decision: keys. Why: Bypass. Invalidates-if: none.
+
+**Files Touched:** a.rs, b.rs, c.rs, d.rs, e.rs, f.rs, g.rs, h.rs, i.rs, j.rs, k.rs, l.rs, m.rs, n.rs, o.rs, p.rs, q.rs, r.rs, s.rs, t.rs, u.rs, v.rs, w.rs, x.rs, y.rs, z.rs
+
+**Narrative log:** `/tmp/named_foo.md` (read for full context)
+
+---
+"#;
+        let compressed = compress_search_sessions(raw, &json!({}), CompressionLevel::Summary);
+        assert!(compressed.contains("## Session Search:"));
+        assert!(compressed.contains("**Summary:** Implemented 2.9 and 3.3."));
+        assert!(compressed.contains("**Pending Tasks:** 1. Rebuild MCP"));
+        assert!(compressed.contains("**Narrative log:**"));
+        assert!(compressed.contains("(+2 more)"));
+        assert!(!compressed.contains("Goal: Implement 2.9"));
+        // Files kept at Summary (may be truncated when very long)
+        assert!(compressed.contains("**Files Touched:**"));
+        assert!(compressed.len() < raw.len());
+    }
+
+    #[test]
+    fn test_compress_search_sessions_minimal_omits_files() {
+        let raw = r#"## Session Search: "x"
+
+### session_1 (relevance: 0.5, confidence: 0.9)
+
+**Summary:** Short summary.
+
+**Decisions:** Goal: A. Decision: B. Why: C. Invalidates-if: D.
+
+**Files Touched:** a.rs, b.rs
+
+**Narrative log:** `/tmp/s.md` (read for full context)
+
+---
+"#;
+        let compressed = compress_search_sessions(raw, &json!({}), CompressionLevel::Minimal);
+        assert!(compressed.contains("**Summary:** Short summary."));
+        assert!(compressed.contains("**Decisions:** (1 — see narrative)"));
+        assert!(!compressed.contains("**Files Touched:**"));
+        assert!(compressed.contains("**Narrative log:**"));
+    }
+
+    #[test]
+    fn test_compress_search_sessions_aggressive_tighter_than_summary() {
+        // First decision alone >140 chars so Aggressive truncates; Summary keeps it.
+        let first = format!(
+            "Goal: Long decision. Decision: {} Why: keep. Invalidates-if: none.",
+            "x".repeat(150)
+        );
+        assert!(first.chars().count() > 140);
+        assert!(first.chars().count() < 280);
+
+        let raw = format!(
+            r#"## Session Search: "levels"
+
+### session_1 (relevance: 0.5, confidence: 0.9)
+
+**Summary:** Level coverage.
+
+**Decisions:** {first} | Goal: Second. Decision: skip. Why: n/a. Invalidates-if: none.
+
+**Files Touched:** a.rs, b.rs
+
+**Narrative log:** `/tmp/s.md` (read for full context)
+
+---
+"#
+        );
+
+        let summary = compress_search_sessions(&raw, &json!({}), CompressionLevel::Summary);
+        let aggressive = compress_search_sessions(&raw, &json!({}), CompressionLevel::Aggressive);
+
+        assert!(summary.contains("(+1 more)"));
+        assert!(summary.contains(&first));
+        assert!(summary.contains("**Files Touched:**"));
+
+        assert!(aggressive.contains("(+1 more)"));
+        assert!(aggressive.contains('…'));
+        assert!(!aggressive.contains(&first)); // truncated
+        assert!(!aggressive.contains("**Files Touched:**")); // only Summary keeps files
+        assert!(aggressive.contains("**Summary:** Level coverage."));
+        assert!(aggressive.len() < summary.len());
+    }
+
+    #[test]
+    fn test_compress_search_sessions_off_passthrough() {
+        let raw = r#"## Session Search: "x"
+
+### session_1 (relevance: 0.5, confidence: 0.9)
+
+**Summary:** Keep me whole.
+
+**Decisions:** Goal: A. Decision: B. Why: C. Invalidates-if: D. | Goal: E. Decision: F. Why: G. Invalidates-if: H.
+
+**Files Touched:** a.rs, b.rs
+
+**Narrative log:** `/tmp/s.md` (read for full context)
+
+---
+"#;
+        assert_eq!(
+            compress_search_sessions(raw, &json!({}), CompressionLevel::Off),
+            raw
+        );
+        assert_eq!(
+            compress_tool_output_with_level(
+                raw,
+                "search_sessions",
+                &json!({}),
+                CompressionLevel::Off
+            ),
+            raw
+        );
+    }
+
+    #[test]
+    fn test_compress_search_sessions_passthrough_on_bad_format() {
+        let raw = "not a session search";
+        assert_eq!(
+            compress_search_sessions(raw, &json!({}), CompressionLevel::Summary),
             raw
         );
     }

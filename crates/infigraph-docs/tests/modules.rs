@@ -523,6 +523,60 @@ fn test_docindex_init_creates_store() {
 }
 
 #[test]
+fn test_docindex_init_recovers_from_corrupt_db() {
+    let dir = tempfile::tempdir().unwrap();
+    let ig = dir.path().join(".infigraph");
+    std::fs::create_dir_all(&ig).unwrap();
+    // Garbage file where Kuzu DB should be — open must fail, then wipe+rebuild
+    std::fs::write(ig.join("docs.kuzu"), b"not-a-valid-kuzu-database").unwrap();
+    std::fs::write(
+        dir.path().join("README.md"),
+        "# Recover\n\nDoc content for rebuild.\n",
+    )
+    .unwrap();
+
+    let mut idx = DocIndex::open(dir.path()).unwrap();
+    idx.init()
+        .expect("init should wipe corrupt docs.kuzu and rebuild");
+    assert!(idx.store().is_some());
+    let stats = idx.store().unwrap().stats().unwrap();
+    assert!(
+        stats.document_count >= 1,
+        "expected rebuilt docs, got document_count={}",
+        stats.document_count
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_docindex_init_errors_when_wipe_cannot_repair() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let ig = dir.path().join(".infigraph");
+    std::fs::create_dir_all(&ig).unwrap();
+    std::fs::write(ig.join("docs.kuzu"), b"not-a-valid-kuzu-database").unwrap();
+
+    // Read-only .infigraph — clean cannot delete corrupt DB, reopen still fails
+    let mut perms = std::fs::metadata(&ig).unwrap().permissions();
+    perms.set_mode(0o555);
+    std::fs::set_permissions(&ig, perms).unwrap();
+
+    let mut idx = DocIndex::open(dir.path()).unwrap();
+    let result = idx.init();
+
+    // Restore so tempfile can clean up
+    let mut perms = std::fs::metadata(&ig).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&ig, perms).unwrap();
+
+    assert!(
+        result.is_err(),
+        "expected init to error when corrupt DB cannot be removed"
+    );
+}
+
+#[test]
 fn test_docindex_clean_removes_db() {
     let dir = tempfile::tempdir().unwrap();
     let mut idx = DocIndex::open(dir.path()).unwrap();

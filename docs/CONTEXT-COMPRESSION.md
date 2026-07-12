@@ -63,6 +63,7 @@ Per-tool safety caps prevent quality loss — search is capped at Summary (eval 
 | `list_files` | Directory tree with file counts | varies |
 | `get_api_surface` | Collapsed per-file, keep routes | varies |
 | `git_summary` | Truncate symbol lists > 5 | varies |
+| `search_sessions` | Keep summary/pending/narrative; truncate Decisions pipes + long Files Touched | high on decision-heavy results |
 
 ### Generic Compressors (via `compress` tool)
 
@@ -206,13 +207,15 @@ These items are deferred — blocked by MCP protocol limitations or deprioritize
 
 | Item | Why Deferred | Unblocks When |
 |------|-------------|---------------|
-| **Focus-aware compression** (3.3) | Mostly covered by `for_edit=true` + content-hash dedup | Value proven in production usage |
 | **Graph-aware context compaction** (3.6) | MCP server can't detect when Claude Code triggers context compaction | MCP spec adds compaction event or client notification |
 | **Cross-agent context sharing** (Phase 5) | MCP protocol carries no agent identifier — can't distinguish which agent is calling | MCP spec adds agent/session ID to requests |
 | **Multi-provider cache adaptation** (6.5) | MCP doesn't expose provider metadata (Claude vs GPT vs Gemini cache models differ) | MCP spec adds client capability negotiation |
-| **Compression failure fallback** (2.9) | Compressors already fall through to raw on parse failure; formal `catch_unwind` + health monitoring not yet added | Production incident or stability concern |
 | **Smart detail prefetch** (2.8) | `detail=true` is cheap and explicit; prefetching adds complexity for marginal gain | Usage data shows agents repeatedly request detail on same symbols |
 | **LLM follow-up detection** (8.3) | Can't detect from MCP server when agent asks follow-up questions suggesting info was lost | Bidirectional MCP or agent feedback channel |
+
+**Recently completed from this list:**
+- **Compression failure fallback** (2.9) — `catch_unwind` around compress+dedup; panics return raw output and increment `Compress failures` in `get_compression_stats`
+- **Focus-aware compression** (3.3) — `get_code_snippet` / `get_doc_context(for_edit=true)` mark symbols+files in focus; matching tool args bypass compression for the staleness window
 
 See [Implementation Plan](PLAN-context-compression.md) for full design details on each item.
 

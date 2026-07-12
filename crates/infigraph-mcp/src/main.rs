@@ -37,9 +37,9 @@ fn main() -> Result<()> {
                 // SIGSEGV — likely corrupt DB, reindex all registered projects
                 mcp_log(
                     "CRASH",
-                    "SIGSEGV detected — triggering auto-reindex of registered projects",
+                    "SIGSEGV detected — triggering auto-reindex of registered projects (code + docs)",
                 );
-                eprintln!("infigraph-mcp: crash detected (SIGSEGV), auto-reindexing...");
+                eprintln!("infigraph-mcp: crash detected (SIGSEGV), auto-reindexing code+docs...");
                 auto_reindex_all();
                 // Respawn worker after reindex
                 continue;
@@ -53,9 +53,11 @@ fn main() -> Result<()> {
                     // Negative exit code on Windows = unhandled exception (e.g. access violation)
                     mcp_log(
                         "CRASH",
-                        &format!("Crash detected (exit {code}) — triggering auto-reindex"),
+                        &format!(
+                            "Crash detected (exit {code}) — triggering auto-reindex of code+docs"
+                        ),
                     );
-                    eprintln!("infigraph-mcp: crash detected, auto-reindexing...");
+                    eprintln!("infigraph-mcp: crash detected, auto-reindexing code+docs...");
                     auto_reindex_all();
                     continue;
                 }
@@ -120,13 +122,7 @@ fn reindex_path(cli_path: &std::path::Path, path: &std::path::Path) {
     let path_str = path.to_string_lossy().to_string();
     mcp_log("INFO", &format!("Auto-reindexing: {path_str}"));
 
-    let graph_path = path.join(".infigraph").join("graph");
-    if graph_path.exists() {
-        let _ = std::fs::remove_file(&graph_path);
-        let _ = std::fs::remove_dir_all(&graph_path);
-    }
-    let wal_path = path.join(".infigraph").join("graph.wal");
-    let _ = std::fs::remove_file(&wal_path);
+    infigraph_mcp::recovery::wipe_code_and_docs(path);
 
     let result = std::process::Command::new(cli_path)
         .arg("index")
@@ -466,12 +462,13 @@ fn handle_tools_call(id: &Value, request: &Value) -> Value {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             infigraph_mcp::session_context::record_tool_call(tool_name, detail_requested);
+            infigraph_mcp::session_context::record_focus(tool_name, &args);
             let compressed =
-                infigraph_mcp::compress::compress_tool_output(&content, tool_name, &args);
-            let compressed =
-                infigraph_mcp::session_context::apply_seen_dedup(&compressed, tool_name, &args);
+                infigraph_mcp::compress::compress_pipeline_safe(&content, tool_name, &args);
             let comp_tokens = estimate_tokens(&compressed);
-            let level = infigraph_mcp::session_context::track_tokens(comp_tokens);
+            // Level actually used for this call (config/env), not budget auto_level.
+            let level_used = infigraph_mcp::session_context::get_compression_level();
+            infigraph_mcp::session_context::track_tokens(comp_tokens);
             if metrics_enabled {
                 let raw_tokens = estimate_tokens(&content);
                 let ratio = if raw_tokens > 0 {
@@ -499,7 +496,7 @@ fn handle_tools_call(id: &Value, request: &Value) -> Value {
                     "raw_tokens": raw_tokens,
                     "compressed_tokens": comp_tokens,
                     "compression_ratio": (ratio * 100.0).round() / 100.0,
-                    "compression_level": format!("{:?}", level),
+                    "compression_level": format!("{:?}", level_used),
                     "detail_requested": detail,
                     "args_summary": args_summary,
                 });
