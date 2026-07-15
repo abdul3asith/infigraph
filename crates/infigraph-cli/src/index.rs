@@ -170,10 +170,24 @@ pub(crate) fn cmd_index(root: &Path, full: bool, no_embed: bool) -> Result<()> {
         return Ok(());
     }
     {
-        let store = prism.store().context("graph not initialized")?;
         let changed: Vec<&str> = result.extractions.iter().map(|e| e.file.as_str()).collect();
-        let count = infigraph_core::embed::update_embeddings(store, root, &changed)?;
-        println!("Saved {} embeddings to .infigraph/embeddings.bin", count);
+        #[allow(unused_mut)]
+        let mut done = false;
+
+        #[cfg(feature = "remote")]
+        if let Some(backend) = prism.backend() {
+            let pg = infigraph_core::meta::PostgresMetaStore::connect_from_env()?;
+            pg.init_schema()?;
+            let count = infigraph_core::embed::update_embeddings_remote(backend, &pg, &changed)?;
+            println!("Saved {} embeddings to Postgres pgvector", count);
+            done = true;
+        }
+
+        if !done {
+            let store = prism.store().context("graph not initialized")?;
+            let count = infigraph_core::embed::update_embeddings(store, root, &changed)?;
+            println!("Saved {} embeddings to .infigraph/embeddings.bin", count);
+        }
     }
 
     // Auto-index documents (PDF, DOCX, XML, Markdown, etc.)

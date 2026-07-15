@@ -5,12 +5,15 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use tokio::runtime::Handle;
+use pgvector::Vector;
 use tokio_postgres::{Client, NoTls};
 
 use crate::graph::SessionData;
 use crate::multi::{Contract, ContractKind, Group, Registry, RepoEntry};
 
 const INIT_SQL: &str = r#"
+CREATE EXTENSION IF NOT EXISTS vector;
+
 CREATE TABLE IF NOT EXISTS repos (
     name TEXT PRIMARY KEY,
     path TEXT NOT NULL,
@@ -66,10 +69,11 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE TABLE IF NOT EXISTS embeddings (
     id TEXT PRIMARY KEY,
     kind TEXT NOT NULL DEFAULT 'symbol',
-    vector REAL[] NOT NULL
+    vector vector(256) NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_embeddings_kind ON embeddings(kind);
+CREATE INDEX IF NOT EXISTS idx_embeddings_hnsw ON embeddings USING hnsw (vector vector_cosine_ops);
 CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_contracts_group ON contracts(group_name);
 CREATE INDEX IF NOT EXISTS idx_file_hashes_repo ON file_hashes(repo);
@@ -569,18 +573,28 @@ impl PostgresMetaStore {
 
     // ── Embedding operations ─────────────────────────────────────────
 
-    pub fn upsert_embedding(&self, id: &str, kind: &str, vector: &[f32]) -> Result<()> {
+    pub fn upsert_embedding(&self, id: &str, kind: &str, vec: &[f32]) -> Result<()> {
+        let v = Vector::from(vec.to_vec());
         self.block_on(async {
             self.client
                 .execute(
                     "INSERT INTO embeddings (id, kind, vector) VALUES ($1, $2, $3) \
                      ON CONFLICT (id) DO UPDATE SET kind = EXCLUDED.kind, vector = EXCLUDED.vector",
-                    &[&id, &kind, &vector],
+                    &[&id, &kind, &v],
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("upsert embedding failed: {e}"))
         })?;
         Ok(())
+    }
+
+    pub fn upsert_embeddings_bulk(&self, embeddings: &[(String, Vec<f32>)], kind: &str) -> Result<usize> {
+        let mut count = 0usize;
+        for (id, vec) in embeddings {
+            self.upsert_embedding(id, kind, vec)?;
+            count += 1;
+        }
+        Ok(count)
     }
 
     pub fn get_embedding(&self, id: &str) -> Result<Option<Vec<f32>>> {
@@ -594,7 +608,10 @@ impl PostgresMetaStore {
                     .await
                     .map_err(|e| anyhow::anyhow!("get embedding failed: {e}"))
             })?;
-        Ok(rows.first().map(|r| r.get(0)))
+        Ok(rows.first().map(|r| {
+            let v: Vector = r.get(0);
+            v.to_vec()
+        }))
     }
 
     pub fn delete_embeddings(&self, ids: &[String]) -> Result<()> {
@@ -612,30 +629,22 @@ impl PostgresMetaStore {
         Ok(())
     }
 
-    /// Nearest-neighbor search using cosine distance on REAL[] columns.
-    /// Brute-force scan — adequate for <100K embeddings in sidecar mode.
+    /// Nearest-neighbor search using pgvector HNSW index with cosine distance.
     pub fn search_nearest(
         &self,
         query_vec: &[f32],
         kind: &str,
         limit: usize,
     ) -> Result<Vec<(String, f32)>> {
+        let qv = Vector::from(query_vec.to_vec());
         let rows = self
             .block_on(async {
                 self.client
                     .query(
-                        "SELECT id, \
-                           1 - ( \
-                             (SELECT SUM(a * b) FROM unnest(vector, $1::real[]) AS t(a, b)) / \
-                             NULLIF( \
-                               SQRT((SELECT SUM(a * a) FROM unnest(vector) AS t(a))) * \
-                               SQRT((SELECT SUM(b * b) FROM unnest($1::real[]) AS t(b))), \
-                               0 \
-                             ) \
-                           ) AS distance \
+                        "SELECT id, vector <=> $1 AS distance \
                          FROM embeddings WHERE kind = $2 \
-                         ORDER BY distance ASC LIMIT $3",
-                        &[&query_vec, &kind, &(limit as i64)],
+                         ORDER BY vector <=> $1 LIMIT $3",
+                        &[&qv, &kind, &(limit as i64)],
                     )
                     .await
                     .map_err(|e| anyhow::anyhow!("search nearest failed: {e}"))
@@ -645,8 +654,29 @@ impl PostgresMetaStore {
             .iter()
             .filter_map(|r| {
                 let id: String = r.get(0);
-                let dist: Option<f32> = r.try_get(1).ok();
-                dist.map(|d| (id, d))
+                let dist: f64 = r.get(1);
+                Some((id, dist as f32))
+            })
+            .collect())
+    }
+
+    pub fn all_embeddings(&self, kind: &str) -> Result<Vec<(String, Vec<f32>)>> {
+        let rows = self
+            .block_on(async {
+                self.client
+                    .query(
+                        "SELECT id, vector FROM embeddings WHERE kind = $1",
+                        &[&kind],
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!("all embeddings failed: {e}"))
+            })?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                let id: String = r.get(0);
+                let v: Vector = r.get(1);
+                (id, v.to_vec())
             })
             .collect())
     }

@@ -44,7 +44,7 @@ memmap2 = "0.9"
 [features]
 default = []
 neo4j = ["neo4rs", "tokio"]
-postgres = ["tokio-postgres", "tokio"]
+postgres = ["tokio-postgres", "pgvector", "tokio"]
 remote = ["neo4j", "postgres"]
 
 [dependencies.neo4rs]
@@ -58,6 +58,11 @@ optional = true
 
 [dependencies.tokio-postgres]
 version = "0.7"
+optional = true
+
+[dependencies.pgvector]
+version = "0.4"
+features = ["postgres"]
 optional = true
 
 [dev-dependencies]

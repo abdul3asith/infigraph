@@ -2417,7 +2417,7 @@ dependencies = [
 
 [[package]]
 name = "infigraph-cli"
-version = "2.7.1"
+version = "2.8.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2445,7 +2445,7 @@ dependencies = [
 
 [[package]]
 name = "infigraph-confluence"
-version = "2.7.1"
+version = "2.8.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2459,7 +2459,7 @@ dependencies = [
 
 [[package]]
 name = "infigraph-core"
-version = "2.7.1"
+version = "2.8.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -2475,6 +2475,7 @@ dependencies = [
  "neo4rs",
  "notify",
  "parquet",
+ "pgvector",
  "protobuf",
  "rayon",
  "regex",
@@ -2496,7 +2497,7 @@ dependencies = [
 
 [[package]]
 name = "infigraph-docs"
-version = "2.7.1"
+version = "2.8.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -2520,7 +2521,7 @@ dependencies = [
 
 [[package]]
 name = "infigraph-grammar-plugin"
-version = "2.7.1"
+version = "2.8.0"
 dependencies = [
  "anyhow",
  "dirs-next",
@@ -2533,7 +2534,7 @@ dependencies = [
 
 [[package]]
 name = "infigraph-languages"
-version = "2.7.1"
+version = "2.8.0"
 dependencies = [
  "anyhow",
  "infigraph-core",
@@ -2601,7 +2602,7 @@ dependencies = [
 
 [[package]]
 name = "infigraph-mcp"
-version = "2.7.1"
+version = "2.8.0"
 dependencies = [
  "anyhow",
  "fs2",
@@ -2626,7 +2627,7 @@ dependencies = [
 
 [[package]]
 name = "infigraph-pipeline-plugin"
-version = "2.7.1"
+version = "2.8.0"
 dependencies = [
  "anyhow",
  "dirs-next",
@@ -2992,7 +2993,7 @@ checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
 name = "lsp-to-scip"
-version = "2.7.1"
+version = "2.8.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3888,6 +3889,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9744bc48116fee06334924bb5f2bad41eed5e89bd26e29b0b799f9a3f82c210"
 dependencies = [
  "pest",
+]
+
+[[package]]
+name = "pgvector"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3673cba5b9a124916096a423b806a9f29620972c6c97b08db5f2053e9428b481"
+dependencies = [
+ "bytes",
+ "postgres-types",
 ]
 
 [[package]]

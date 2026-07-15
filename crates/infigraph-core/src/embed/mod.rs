@@ -500,6 +500,86 @@ pub fn update_embeddings(
     Ok(count)
 }
 
+/// Update embeddings for remote mode — reads symbols from GraphBackend, stores in Postgres pgvector.
+#[cfg(feature = "postgres")]
+pub fn update_embeddings_remote(
+    backend: &dyn crate::graph::GraphBackend,
+    pg: &crate::meta::PostgresMetaStore,
+    changed_files: &[&str],
+) -> Result<usize> {
+    use rayon::prelude::*;
+    use std::sync::Arc;
+
+    let rows = backend.raw_query("MATCH (s:Symbol) RETURN s.id, s.name, s.kind, s.file, s.docstring, s.language, s.parameters, s.return_type")?;
+    if rows.is_empty() {
+        return Ok(0);
+    }
+
+    let existing_ids: std::collections::HashSet<String> = pg
+        .all_embeddings("symbol")
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+
+    let changed_set: std::collections::HashSet<&str> = changed_files.iter().copied().collect();
+
+    let to_embed: Vec<(String, String)> = rows
+        .iter()
+        .filter_map(|row| {
+            let id = &row[0];
+            let file = row.get(3).map(|s| s.as_str()).unwrap_or("");
+            if !changed_set.is_empty() && !changed_set.contains(file) && existing_ids.contains(id) {
+                return None;
+            }
+            let name = &row[1];
+            let kind = &row[2];
+            let doc = row.get(4).map(|s| s.as_str()).unwrap_or("");
+            let lang = row.get(5).map(|s| s.as_str()).unwrap_or("");
+            let params = row.get(6).map(|s| s.as_str()).unwrap_or("");
+            let ret = row.get(7).map(|s| s.as_str()).unwrap_or("");
+            let text = rich_symbol_text_full(kind, name, file, lang, doc, params, ret);
+            Some((id.clone(), text))
+        })
+        .collect();
+
+    if to_embed.is_empty() {
+        return Ok(existing_ids.len());
+    }
+
+    let embedder: Arc<Box<dyn EmbedProvider>> = Arc::new(best_embedder());
+    const BATCH: usize = 256;
+    let results: Vec<Vec<(String, Vec<f32>)>> = to_embed
+        .par_chunks(BATCH)
+        .map(|chunk| {
+            let emb = Arc::clone(&embedder);
+            let texts: Vec<&str> = chunk.iter().map(|(_, t)| t.as_str()).collect();
+            let vecs = emb.embed_batch(&texts).unwrap_or_default();
+            chunk
+                .iter()
+                .enumerate()
+                .filter_map(|(i, (id, _))| vecs.get(i).map(|v| (id.clone(), v.clone())))
+                .collect()
+        })
+        .collect();
+
+    let all: Vec<(String, Vec<f32>)> = results.into_iter().flatten().collect();
+    let count = all.len();
+    pg.upsert_embeddings_bulk(&all, "symbol")?;
+
+    // Clean up orphan embeddings
+    let valid_ids: std::collections::HashSet<String> = rows.iter().map(|r| r[0].clone()).collect();
+    let orphans: Vec<String> = existing_ids
+        .into_iter()
+        .filter(|id| !valid_ids.contains(id))
+        .collect();
+    if !orphans.is_empty() {
+        pg.delete_embeddings(&orphans)?;
+    }
+
+    Ok(count + valid_ids.len().saturating_sub(count))
+}
+
 // ---------------------------------------------------------------------------
 // HNSW index (usearch) — optional acceleration for vector search
 // ---------------------------------------------------------------------------
