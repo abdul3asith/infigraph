@@ -96,7 +96,7 @@ jobs:
           name: infigraph-driver
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }} -p infigraph-cli -p infigraph-mcp ${{ matrix.cargo_features }}
+        run: cargo build --release --target ${{ matrix.target }} -p infigraph-cli -p infigraph-mcp --features remote ${{ matrix.cargo_features }}
 
       - name: Sign (macOS)
         if: runner.os == 'macOS'
