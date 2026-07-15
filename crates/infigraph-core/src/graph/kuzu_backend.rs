@@ -35,6 +35,11 @@ impl KuzuBackend {
         Ok(Self { store })
     }
 
+    /// Wrap an already-opened GraphStore (avoids double-open).
+    pub fn from_store(store: GraphStore) -> Self {
+        Self { store }
+    }
+
     /// Access underlying GraphStore (escape hatch for callers that
     /// still need raw Kùzu access during migration).
     pub fn inner(&self) -> &GraphStore {

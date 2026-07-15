@@ -54,6 +54,16 @@ pub struct Infigraph {
     db_path: PathBuf,
     registry: LanguageRegistry,
     store: Option<GraphStore>,
+    backend_kind: BackendKind,
+}
+
+/// Which graph backend is active.
+enum BackendKind {
+    /// Embedded Kùzu (default). GraphStore lives in `self.store`.
+    Kuzu,
+    /// Remote Neo4j sidecar via Bolt.
+    #[cfg(feature = "neo4j")]
+    Neo4j(graph::Neo4jBackend),
 }
 
 impl Infigraph {
@@ -66,27 +76,49 @@ impl Infigraph {
             db_path,
             registry,
             store: None,
+            backend_kind: BackendKind::Kuzu,
         })
     }
 
     /// Initialize the graph store (creates DB on first run).
     /// On corruption, wipes the graph directory and retries.
+    ///
+    /// Backend selection via `INFIGRAPH_BACKEND` env var:
+    /// - `kuzu` (default): embedded Kùzu graph DB
+    /// - `neo4j`: remote Neo4j sidecar via Bolt (requires `neo4j` feature)
     pub fn init(&mut self) -> Result<()> {
-        match GraphStore::open(&self.db_path) {
-            Ok(store) => {
-                self.store = Some(store);
+        let backend_env = std::env::var("INFIGRAPH_BACKEND").unwrap_or_else(|_| "kuzu".into());
+
+        match backend_env.as_str() {
+            #[cfg(feature = "neo4j")]
+            "neo4j" => {
+                let neo = graph::Neo4jBackend::connect_from_env()?;
+                neo.init_schema()?;
+                self.backend_kind = BackendKind::Neo4j(neo);
                 Ok(())
             }
-            Err(first_err) => {
-                eprintln!(
-                    "[graph] open failed ({first_err}), wiping corrupt graph and rebuilding..."
-                );
-                Self::wipe_graph(&self.db_path);
-                let store = GraphStore::open(&self.db_path).with_context(|| {
-                    format!("graph still unreadable after wipe (was: {first_err})")
-                })?;
-                self.store = Some(store);
-                Ok(())
+            #[cfg(not(feature = "neo4j"))]
+            "neo4j" => {
+                anyhow::bail!("neo4j backend requested but binary compiled without `neo4j` feature")
+            }
+            _ => {
+                match GraphStore::open(&self.db_path) {
+                    Ok(store) => {
+                        self.store = Some(store);
+                        Ok(())
+                    }
+                    Err(first_err) => {
+                        eprintln!(
+                            "[graph] open failed ({first_err}), wiping corrupt graph and rebuilding..."
+                        );
+                        Self::wipe_graph(&self.db_path);
+                        let store = GraphStore::open(&self.db_path).with_context(|| {
+                            format!("graph still unreadable after wipe (was: {first_err})")
+                        })?;
+                        self.store = Some(store);
+                        Ok(())
+                    }
+                }
             }
         }
     }
@@ -109,6 +141,12 @@ impl Infigraph {
     /// Index all supported files in the project, building the graph.
     /// Skips files whose content hash matches the stored hash (incremental).
     pub fn index(&self) -> Result<IndexResult> {
+        // Neo4j backend: clean trait-based path
+        if let Some(backend) = self.backend() {
+            return self.index_via_backend(backend);
+        }
+
+        // Kuzu backend: existing Kuzu-specific path
         let store = self.store.as_ref().context("call init() first")?;
 
         let files = self.collect_files()?;
@@ -301,15 +339,132 @@ impl Infigraph {
         })
     }
 
+    /// Backend-agnostic index path (used for Neo4j and future backends).
+    fn index_via_backend(&self, backend: &dyn graph::GraphBackend) -> Result<IndexResult> {
+        let files = self.collect_files()?;
+        let total = files.len();
+
+        let existing_hashes = backend.get_file_hashes().unwrap_or_default();
+
+        let done = std::sync::atomic::AtomicUsize::new(0);
+        let extractions: Vec<FileExtraction> = files
+            .par_iter()
+            .filter_map(|path| {
+                let rel_path = path
+                    .strip_prefix(&self.root)
+                    .ok()?
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let source = std::fs::read(path).ok()?;
+                let hash = {
+                    let mut h = Sha256::new();
+                    h.update(&source);
+                    format!("{:x}", h.finalize())
+                };
+                let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                let pct = n * 100 / total;
+                let prev_pct = (n - 1) * 100 / total;
+                if (pct / 25) > (prev_pct / 25) || n == total {
+                    eprintln!("Parsing: {}/{} ({}%)", n, total, pct);
+                }
+                if existing_hashes.get(&rel_path).map(|s| s.as_str()) == Some(hash.as_str()) {
+                    return None;
+                }
+                let pack = self.registry.for_file_with_content(&rel_path, &source)?;
+                extract::extract_file(&rel_path, &source, pack).ok()
+            })
+            .collect();
+
+        let indexed = extractions.len();
+
+        if !extractions.is_empty() {
+            eprintln!("Writing: {} files (backend bulk)", indexed);
+            let write_start = std::time::Instant::now();
+            backend.upsert_files_bulk(&extractions, existing_hashes.is_empty())?;
+            eprintln!("Write complete: {}s", write_start.elapsed().as_secs());
+        }
+
+        // Prune stale files
+        {
+            let current_files: std::collections::HashSet<String> = files
+                .iter()
+                .filter_map(|p| {
+                    p.strip_prefix(&self.root)
+                        .ok()
+                        .map(|r| r.to_string_lossy().replace('\\', "/"))
+                })
+                .collect();
+            let stale: Vec<String> = existing_hashes
+                .keys()
+                .filter(|k| !current_files.contains(k.as_str()))
+                .cloned()
+                .collect();
+            if !stale.is_empty() {
+                eprintln!("[index] pruning {} stale file(s) from graph", stale.len());
+                for f in &stale {
+                    let _ = backend.remove_file(f);
+                }
+            }
+        }
+
+        let resolve_start = std::time::Instant::now();
+        if !extractions.is_empty() {
+            eprintln!("Resolving: calls + inheritance for {} files", indexed);
+        }
+        let resolve_stats = backend
+            .resolve_calls(&extractions, None)
+            .unwrap_or_else(|e| {
+                eprintln!("warning: call resolution failed: {e}");
+                resolve::ResolveStats {
+                    total_calls: 0,
+                    resolved: 0,
+                    unresolved: 0,
+                    learned_resolved: 0,
+                    inherits_resolved: 0,
+                }
+            });
+        if !extractions.is_empty() {
+            eprintln!(
+                "Resolve complete: {}s ({} resolved, {} unresolved)",
+                resolve_start.elapsed().as_secs(),
+                resolve_stats.resolved,
+                resolve_stats.unresolved
+            );
+        }
+
+        Ok(IndexResult {
+            total_files: total,
+            indexed_files: indexed,
+            extractions,
+            resolve_stats,
+        })
+    }
+
     /// Get graph statistics.
     pub fn stats(&self) -> Result<graph::GraphStats> {
+        if let Some(backend) = self.backend() {
+            return backend.stats();
+        }
         let store = self.store.as_ref().context("call init() first")?;
         store.stats()
     }
 
-    /// Access the underlying graph store (for direct queries).
+    /// Access the underlying graph store (for direct Kùzu queries).
+    /// Returns None when using Neo4j backend.
     pub fn store(&self) -> Option<&GraphStore> {
         self.store.as_ref()
+    }
+
+    /// Access the graph backend (works for all backend types).
+    pub fn backend(&self) -> Option<&dyn graph::GraphBackend> {
+        match &self.backend_kind {
+            BackendKind::Kuzu => {
+                // No KuzuBackend stored separately — callers use store() for Kuzu
+                None
+            }
+            #[cfg(feature = "neo4j")]
+            BackendKind::Neo4j(neo) => Some(neo),
+        }
     }
 
     /// Access the language registry.
@@ -325,7 +480,6 @@ impl Infigraph {
     /// Index (or re-index) a single file by its path on disk.
     /// Path may be absolute or relative to project root.
     pub fn index_file(&self, path: &Path) -> Result<()> {
-        let store = self.store.as_ref().context("call init() first")?;
         let rel = if path.is_absolute() {
             path.strip_prefix(&self.root)
                 .unwrap_or(path)
@@ -341,6 +495,10 @@ impl Infigraph {
             .for_file_with_content(&rel, &source)
             .with_context(|| format!("no language for {rel}"))?;
         let extraction = extract::extract_file(&rel, &source, pack)?;
+        if let Some(backend) = self.backend() {
+            return backend.upsert_file(&extraction);
+        }
+        let store = self.store.as_ref().context("call init() first")?;
         store.upsert_file(&extraction)?;
         Ok(())
     }
@@ -464,7 +622,6 @@ impl Infigraph {
 
     /// Remove a deleted file from the graph.
     pub fn remove_file(&self, path: &Path) -> Result<()> {
-        let store = self.store.as_ref().context("call init() first")?;
         let rel = if path.is_absolute() {
             path.strip_prefix(&self.root)
                 .unwrap_or(path)
@@ -473,6 +630,10 @@ impl Infigraph {
         } else {
             path.to_string_lossy().replace('\\', "/")
         };
+        if let Some(backend) = self.backend() {
+            return backend.remove_file(&rel);
+        }
+        let store = self.store.as_ref().context("call init() first")?;
         store.remove_file(&rel)
     }
 
