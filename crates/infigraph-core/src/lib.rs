@@ -14,6 +14,7 @@ pub mod graph;
 pub mod lang;
 pub mod learned;
 pub mod manifest;
+pub mod meta;
 pub mod model;
 pub mod multi;
 pub mod patterns;
