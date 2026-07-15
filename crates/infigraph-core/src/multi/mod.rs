@@ -16,6 +16,9 @@ use crate::graph::GraphQuery;
 use crate::lang::LanguageRegistry;
 use crate::Infigraph;
 
+#[cfg(feature = "postgres")]
+use crate::meta::PostgresMetaStore;
+
 /// Global registry stored at ~/.infigraph/registry.json
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Registry {
@@ -62,8 +65,15 @@ pub enum ContractKind {
 }
 
 impl Registry {
-    /// Load registry from ~/.infigraph/registry.json
+    /// Load registry — from Postgres in remote mode, JSON file otherwise.
     pub fn load() -> Result<Self> {
+        #[cfg(feature = "postgres")]
+        {
+            if is_remote_mode() {
+                let pg = PostgresMetaStore::connect_from_env()?;
+                return pg.load_registry();
+            }
+        }
         let path = registry_path()?;
         if !path.exists() {
             return Ok(Self::default());
@@ -73,8 +83,15 @@ impl Registry {
         Ok(registry)
     }
 
-    /// Save registry to disk.
+    /// Save registry — to Postgres in remote mode, JSON file otherwise.
     pub fn save(&self) -> Result<()> {
+        #[cfg(feature = "postgres")]
+        {
+            if is_remote_mode() {
+                let pg = PostgresMetaStore::connect_from_env()?;
+                return pg.save_registry(self);
+            }
+        }
         let path = registry_path()?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -172,11 +189,16 @@ impl Registry {
             let mut prism = Infigraph::open(&entry.path, registry)?;
             prism.init()?;
 
-            let store = prism.store().context("graph not initialized")?;
-            let conn = store.connection()?;
-            let gq = GraphQuery::new(&conn);
+            let query_result = if let Some(backend) = prism.backend() {
+                backend.raw_query(cypher)
+            } else {
+                let store = prism.store().context("graph not initialized")?;
+                let conn = store.connection()?;
+                let gq = GraphQuery::new(&conn);
+                gq.raw_query(cypher)
+            };
 
-            match gq.raw_query(cypher) {
+            match query_result {
                 Ok(rows) => {
                     if !rows.is_empty() {
                         results.push((repo_name.clone(), rows));
@@ -198,15 +220,11 @@ impl Registry {
 /// 2. Decorated functions — docstring contains route decorator (@app.route, #[get], etc.)
 /// 3. Heuristic detect_routes fallback
 pub fn extract_contracts(prism: &Infigraph, service_name: &str) -> Result<Vec<Contract>> {
-    let store = prism.store().context("graph not initialized")?;
-    let conn = store.connection()?;
-    let gq = GraphQuery::new(&conn);
-
     let mut contracts = Vec::new();
     let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // 1. Route symbols (call-expression routes: Express, Gin, Django, etc.)
-    let route_rows = gq.raw_query(
+    let route_rows = raw_query_prism(prism,
         "MATCH (s:Symbol) WHERE s.kind = 'Route' RETURN s.id, s.name, s.kind, s.file, s.docstring",
     )?;
     for row in &route_rows {
@@ -225,7 +243,7 @@ pub fn extract_contracts(prism: &Infigraph, service_name: &str) -> Result<Vec<Co
     }
 
     // 2. Decorated functions with route info in docstring
-    let decorated_rows = gq.raw_query(
+    let decorated_rows = raw_query_prism(prism,
         "MATCH (s:Symbol) WHERE s.kind IN ['Function', 'Method'] AND s.docstring IS NOT NULL AND (s.docstring CONTAINS '@app.route' OR s.docstring CONTAINS '@app.get' OR s.docstring CONTAINS '@app.post' OR s.docstring CONTAINS '@router.get' OR s.docstring CONTAINS '@router.post' OR s.docstring CONTAINS '@router.put' OR s.docstring CONTAINS '@router.delete' OR s.docstring CONTAINS '@router.patch' OR s.docstring CONTAINS '#[get' OR s.docstring CONTAINS '#[post' OR s.docstring CONTAINS '@GetMapping' OR s.docstring CONTAINS '@PostMapping' OR s.docstring CONTAINS '@RequestMapping' OR s.docstring CONTAINS 'MapGet' OR s.docstring CONTAINS 'MapPost') RETURN s.id, s.name, s.kind, s.file, s.docstring",
     )?;
     let mut prefix_cache: std::collections::HashMap<String, String> =
@@ -419,19 +437,13 @@ pub fn sync_group_contracts(
         all_contracts.extend(contracts);
 
         // Collect dependency names while graph is open
-        if let Some(store) = prism.store() {
-            if let Ok(conn) = store.connection() {
-                let gq = crate::graph::GraphQuery::new(&conn);
-                let dep_rows = gq
-                    .raw_query("MATCH (d:Dependency) RETURN d.name")
-                    .unwrap_or_default();
-                let dep_names: Vec<String> = dep_rows
-                    .into_iter()
-                    .filter_map(|r| r.into_iter().next())
-                    .collect();
-                dep_map.push((repo_name.clone(), dep_names));
-            }
-        }
+        let dep_rows = raw_query_prism(&prism, "MATCH (d:Dependency) RETURN d.name")
+            .unwrap_or_default();
+        let dep_names: Vec<String> = dep_rows
+            .into_iter()
+            .filter_map(|r| r.into_iter().next())
+            .collect();
+        dep_map.push((repo_name.clone(), dep_names));
     }
 
     // Match deps against publishers
@@ -472,7 +484,7 @@ pub fn index_group(
     registry: &mut Registry,
     group_name: &str,
     full: bool,
-    build_registry: impl Fn() -> Result<LanguageRegistry>,
+    build_registry: impl Fn() -> Result<LanguageRegistry> + Send + Sync,
 ) -> Result<Vec<(String, usize, usize)>> {
     let group = registry
         .groups
@@ -480,34 +492,81 @@ pub fn index_group(
         .context(format!("group '{}' not found", group_name))?
         .clone();
 
-    let mut results = Vec::new();
+    // Collect entries upfront so we don't borrow registry during indexing
+    let entries: Vec<(String, RepoEntry)> = group
+        .repos
+        .iter()
+        .map(|name| {
+            let entry = registry
+                .repos
+                .get(name)
+                .context(format!("repo '{}' not in registry", name))?
+                .clone();
+            Ok((name.clone(), entry))
+        })
+        .collect::<Result<Vec<_>>>()?;
 
-    for repo_name in &group.repos {
-        let entry = registry
-            .repos
-            .get(repo_name)
-            .context(format!("repo '{}' not in registry", repo_name))?
-            .clone();
-
-        if full {
+    if full {
+        for (_, entry) in &entries {
             let tg_dir = entry.path.join(".infigraph");
             if tg_dir.exists() {
                 std::fs::remove_dir_all(&tg_dir)?;
             }
         }
+    }
 
+    // Neo4j backend supports concurrent writes — safe to parallelize
+    let use_parallel = std::env::var("INFIGRAPH_BACKEND")
+        .map(|v| v == "neo4j")
+        .unwrap_or(false);
+
+    let index_one = |repo_name: &str, entry: &RepoEntry| -> Result<(String, usize, usize, Infigraph)> {
         let lang_registry = build_registry()?;
         let mut prism = Infigraph::open(&entry.path, lang_registry)?;
         prism.init()?;
-        let result = prism.index()?;
-        results.push((repo_name.clone(), result.indexed_files, result.total_files));
-
-        // Index manifests so Dependency nodes exist for SharedPackage detection
-        if let Some(store) = prism.store() {
-            let _ = crate::manifest::index_manifests(prism.root(), store);
+        if prism.backend().is_some() {
+            prism.set_namespace(repo_name);
         }
+        let result = prism.index()?;
+        Ok((repo_name.to_string(), result.indexed_files, result.total_files, prism))
+    };
 
-        registry.register_repo(repo_name, &entry.path, &prism)?;
+    let indexed: Vec<Result<(String, usize, usize, Infigraph)>> = if use_parallel {
+        use rayon::prelude::*;
+        eprintln!("[group] parallel indexing {} repos via Neo4j backend", entries.len());
+        entries
+            .par_iter()
+            .map(|(name, entry)| index_one(name, entry))
+            .collect()
+    } else {
+        entries
+            .iter()
+            .map(|(name, entry)| index_one(name, entry))
+            .collect()
+    };
+
+    // Post-index: register repos + manifest indexing (sequential)
+    let mut results = Vec::new();
+    for item in indexed {
+        match item {
+            Ok((repo_name, indexed_files, total_files, prism)) => {
+                results.push((repo_name.clone(), indexed_files, total_files));
+
+                // Index manifests so Dependency nodes exist for SharedPackage detection
+                // TODO: add manifest indexing via GraphBackend trait for Neo4j mode
+                if let Some(store) = prism.store() {
+                    let _ = crate::manifest::index_manifests(prism.root(), store);
+                }
+
+                let entry = registry.repos.get(&repo_name).cloned();
+                if let Some(entry) = entry {
+                    registry.register_repo(&repo_name, &entry.path, &prism)?;
+                }
+            }
+            Err(e) => {
+                eprintln!("[group] indexing failed: {e}");
+            }
+        }
     }
 
     Ok(results)
@@ -519,4 +578,22 @@ fn registry_path() -> Result<PathBuf> {
         .or_else(dirs_next::home_dir)
         .context("cannot determine home directory")?;
     Ok(home.join(".infigraph").join("registry.json"))
+}
+
+#[cfg(feature = "postgres")]
+fn is_remote_mode() -> bool {
+    std::env::var("INFIGRAPH_BACKEND")
+        .map(|v| v == "neo4j")
+        .unwrap_or(false)
+}
+
+fn raw_query_prism(prism: &Infigraph, cypher: &str) -> Result<Vec<Vec<String>>> {
+    if let Some(backend) = prism.backend() {
+        backend.raw_query(cypher)
+    } else {
+        let store = prism.store().context("graph not initialized")?;
+        let conn = store.connection()?;
+        let gq = GraphQuery::new(&conn);
+        gq.raw_query(cypher)
+    }
 }

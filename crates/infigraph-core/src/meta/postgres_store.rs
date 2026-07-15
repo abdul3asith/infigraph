@@ -126,6 +126,15 @@ impl PostgresMetaStore {
         self.handle.block_on(f)
     }
 
+    pub fn execute_raw(&self, sql: &str) -> Result<u64> {
+        self.block_on(async {
+            self.client
+                .execute(sql, &[])
+                .await
+                .map_err(|e| anyhow::anyhow!("execute_raw failed: {e}"))
+        })
+    }
+
     // ── Registry operations ──────────────────────────────────────────
 
     pub fn load_registry(&self) -> Result<Registry> {

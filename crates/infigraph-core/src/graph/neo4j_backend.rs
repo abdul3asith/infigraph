@@ -291,6 +291,33 @@ impl Neo4jBackend {
             ));
         }
 
+        // CALLS edges — both intra-file and cross-file (MATCH skips missing targets)
+        let calls: Vec<(String, String)> = ext
+            .relations
+            .iter()
+            .filter(|r| r.kind == crate::model::RelationKind::Calls)
+            .map(|r| (r.source_id.clone(), r.target_id.clone()))
+            .collect();
+        for chunk in calls.chunks(BATCH_SIZE) {
+            let pairs: Vec<HashMap<String, String>> = chunk
+                .iter()
+                .map(|(src, tgt)| {
+                    let mut m = HashMap::new();
+                    m.insert("src".into(), src.clone());
+                    m.insert("tgt".into(), tgt.clone());
+                    m
+                })
+                .collect();
+            let _ = self.block_on(self.graph.run(
+                query(
+                    "UNWIND $batch AS p \
+                     MATCH (a:Symbol {id: p.src}), (b:Symbol {id: p.tgt}) \
+                     MERGE (a)-[:CALLS]->(b)",
+                )
+                .param("batch", pairs),
+            ));
+        }
+
         Ok(())
     }
 

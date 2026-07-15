@@ -55,6 +55,9 @@ pub struct Infigraph {
     registry: LanguageRegistry,
     store: Option<GraphStore>,
     backend_kind: BackendKind,
+    /// When set, all file paths and symbol IDs are prefixed with `{namespace}/`.
+    /// Used for multi-repo indexing into a shared Neo4j DB to prevent collisions.
+    namespace: Option<String>,
 }
 
 /// Which graph backend is active.
@@ -77,6 +80,7 @@ impl Infigraph {
             registry,
             store: None,
             backend_kind: BackendKind::Kuzu,
+            namespace: None,
         })
     }
 
@@ -346,15 +350,20 @@ impl Infigraph {
 
         let existing_hashes = backend.get_file_hashes().unwrap_or_default();
 
+        let ns = &self.namespace;
         let done = std::sync::atomic::AtomicUsize::new(0);
         let extractions: Vec<FileExtraction> = files
             .par_iter()
             .filter_map(|path| {
-                let rel_path = path
+                let raw_rel = path
                     .strip_prefix(&self.root)
                     .ok()?
                     .to_string_lossy()
                     .replace('\\', "/");
+                let rel_path = match ns {
+                    Some(prefix) => format!("{}/{}", prefix, raw_rel),
+                    None => raw_rel.clone(),
+                };
                 let source = std::fs::read(path).ok()?;
                 let hash = {
                     let mut h = Sha256::new();
@@ -389,9 +398,13 @@ impl Infigraph {
             let current_files: std::collections::HashSet<String> = files
                 .iter()
                 .filter_map(|p| {
-                    p.strip_prefix(&self.root)
-                        .ok()
-                        .map(|r| r.to_string_lossy().replace('\\', "/"))
+                    p.strip_prefix(&self.root).ok().map(|r| {
+                        let raw = r.to_string_lossy().replace('\\', "/");
+                        match ns {
+                            Some(prefix) => format!("{}/{}", prefix, raw),
+                            None => raw,
+                        }
+                    })
                 })
                 .collect();
             let stale: Vec<String> = existing_hashes
@@ -477,6 +490,12 @@ impl Infigraph {
         &self.root
     }
 
+    /// Set a namespace prefix for multi-repo indexing into a shared DB.
+    /// All file paths and symbol IDs will be prefixed with `{namespace}/`.
+    pub fn set_namespace(&mut self, ns: &str) {
+        self.namespace = Some(ns.to_string());
+    }
+
     /// Index (or re-index) a single file by its path on disk.
     /// Path may be absolute or relative to project root.
     pub fn index_file(&self, path: &Path) -> Result<()> {
@@ -505,21 +524,21 @@ impl Infigraph {
 
     /// Index a batch of files by path, returning an IndexResult with all extractions.
     pub fn index_files(&self, paths: &[PathBuf]) -> Result<IndexResult> {
-        let store = self.store.as_ref().context("call init() first")?;
+        let empty_result = || IndexResult {
+            total_files: 0,
+            indexed_files: 0,
+            extractions: Vec::new(),
+            resolve_stats: resolve::ResolveStats {
+                total_calls: 0,
+                resolved: 0,
+                unresolved: 0,
+                learned_resolved: 0,
+                inherits_resolved: 0,
+            },
+        };
 
         if paths.is_empty() {
-            return Ok(IndexResult {
-                total_files: 0,
-                indexed_files: 0,
-                extractions: Vec::new(),
-                resolve_stats: resolve::ResolveStats {
-                    total_calls: 0,
-                    resolved: 0,
-                    unresolved: 0,
-                    learned_resolved: 0,
-                    inherits_resolved: 0,
-                },
-            });
+            return Ok(empty_result());
         }
 
         let extractions: Vec<FileExtraction> = paths
@@ -549,6 +568,35 @@ impl Infigraph {
         };
 
         let indexed = extractions.len();
+
+        // Route through GraphBackend when available (Neo4j mode)
+        if let Some(backend) = self.backend() {
+            if !extractions.is_empty() {
+                let existing_hashes = backend.get_file_hashes().unwrap_or_default();
+                backend.upsert_files_bulk(&extractions, existing_hashes.is_empty())?;
+            }
+            let resolve_stats = backend
+                .resolve_calls(&extractions, None)
+                .unwrap_or_else(|e| {
+                    eprintln!("warning: call resolution failed: {e}");
+                    resolve::ResolveStats {
+                        total_calls: 0,
+                        resolved: 0,
+                        unresolved: 0,
+                        learned_resolved: 0,
+                        inherits_resolved: 0,
+                    }
+                });
+            return Ok(IndexResult {
+                total_files: paths.len(),
+                indexed_files: indexed,
+                extractions,
+                resolve_stats,
+            });
+        }
+
+        // Kùzu path (existing)
+        let store = self.store.as_ref().context("call init() first")?;
 
         let _write_lock = if !extractions.is_empty() {
             Some(store.write_lock()?)
@@ -640,7 +688,6 @@ impl Infigraph {
     /// Remove all indexed files whose relative path starts with the given prefix.
     /// Handles directory removal where individual file Remove events may not fire.
     pub fn remove_files_by_prefix(&self, path: &Path) -> Result<usize> {
-        let store = self.store.as_ref().context("call init() first")?;
         let rel = if path.is_absolute() {
             path.strip_prefix(&self.root)
                 .unwrap_or(path)
@@ -654,6 +701,20 @@ impl Infigraph {
         } else {
             format!("{rel}/")
         };
+        if let Some(backend) = self.backend() {
+            let rows = backend.raw_query(&format!(
+                "MATCH (f:File) WHERE f.id STARTS WITH '{}' RETURN f.id",
+                prefix.replace('\'', "\\'")
+            ))?;
+            let count = rows.len();
+            for row in &rows {
+                if let Some(file_id) = row.first() {
+                    let _ = backend.remove_file(file_id);
+                }
+            }
+            return Ok(count);
+        }
+        let store = self.store.as_ref().context("call init() first")?;
         store.remove_files_by_prefix(&prefix)
     }
 
