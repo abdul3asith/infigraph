@@ -24,6 +24,7 @@ Built in Rust. Zero LLM dependency. Runs locally. No API keys. No network calls.
 - [How It Works](#how-it-works) — Integration with AI coding agents
 - [Offline-First Design](#offline-first-design) — No APIs, no network calls
 - [Remote MCP (HTTP Transport)](#remote-mcp-http-transport) — Serve as team-wide remote MCP
+- [Multi-Repo Remote Mode](#multi-repo-remote-mode) — Neo4j + Postgres for 30+ repo indexing
 - [Installation](#installation) — Setup for all platforms
 - [Usage Examples](#usage-examples) — CLI commands, Web UI, tasks
 - [Context Compression](#context-compression) — Levels, config, and optional kompress
@@ -247,6 +248,36 @@ Add to `~/.claude.json` or project `.claude/settings.json`:
 ### Auth
 
 Set `INFIGRAPH_API_KEY` on the server. Clients send `Authorization: Bearer <key>`. If no key is set, the server is open.
+
+---
+
+## Multi-Repo Remote Mode
+
+Index **30+ repositories** into a shared Neo4j graph with Postgres metadata — all running as sidecar containers in the same pod. Zero external dependencies.
+
+```bash
+# Build with remote backend support
+cargo install infigraph-cli --features remote
+
+# Set environment
+export INFIGRAPH_BACKEND=neo4j
+export NEO4J_URI=127.0.0.1:7687
+export NEO4J_USER=neo4j
+export NEO4J_PASSWORD=infigraph
+export DATABASE_URL="host=localhost user=infigraph password=infigraph dbname=infigraph"
+
+# Index repos into shared graph
+infigraph group create my-org
+infigraph group build my-org    # parallel indexing via rayon
+```
+
+**What changes in remote mode:**
+- Code graph → Neo4j (concurrent writes, shared across repos)
+- Registry/sessions → Postgres (persistent across container restarts)
+- Namespace prefixing prevents collisions (`svc-auth/src/main.rs` vs `svc-gateway/src/main.rs`)
+- Group build indexes repos in parallel (Kùzu is sequential)
+
+See **[docs/REMOTE-MULTI-REPO.md](docs/REMOTE-MULTI-REPO.md)** for full architecture, setup, and configuration.
 
 ---
 
