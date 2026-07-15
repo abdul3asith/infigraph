@@ -129,6 +129,24 @@ pub(crate) fn cmd_index(root: &Path, full: bool, no_embed: bool) -> Result<()> {
     let stats = prism.stats()?;
     println!("\n{}", stats);
 
+    // In remote mode, register this repo in Postgres so it appears in registry queries
+    #[cfg(feature = "remote")]
+    {
+        if std::env::var("INFIGRAPH_BACKEND")
+            .map(|v| v == "neo4j")
+            .unwrap_or(false)
+        {
+            let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+            let repo_name = canonical
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let mut registry = infigraph_core::multi::Registry::load()?;
+            registry.register_repo(&repo_name, root, &prism)?;
+            println!("Registered '{}' in Postgres registry", repo_name);
+        }
+    }
+
     // Hint: suggest .infigraphignore if none exists
     if !root.join(".infigraphignore").exists() {
         eprintln!("\nhint: Create .infigraphignore in the project root to exclude non-source directories.");
