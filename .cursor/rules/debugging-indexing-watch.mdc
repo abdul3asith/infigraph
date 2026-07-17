@@ -1,0 +1,43 @@
+---
+description: Systematic triage for "index seems stale", "watcher not firing", "reindex not happening", or FD-leak-style watch reports. Concrete log lines, lock files, and grep targets.
+alwaysApply: false
+---
+
+# Debugging indexing/watch issues
+
+## Core loop internals (`crates/infigraph-core/src/watch/mod.rs`)
+
+- Ignored paths (`should_ignore`): `.infigraph`, `.git`, `node_modules`, `__pycache__`, `.venv`, `venv`, `target`, `build`, `dist`, `.tox`, plus anything dotfile-prefixed.
+- Events batch over a 1-second window (`ChangeBatch::new(1000)` in `watch/batch.rs`) — paths accumulate in a `HashSet`, batch fires once `last_event.elapsed() >= window`. Main loop polls `rx.recv_timeout(200ms)`.
+- Root is canonicalized at the top of `watch_project_with_periodic()` — FSEvents on macOS delivers absolute, symlink-resolved paths, so a non-canonical root silently breaks `strip_prefix` for every event (see `infigraph.mdc`'s invariants list).
+
+**Log lines to grep for** (stderr from the watcher process, or `.infigraph/watch.log` if spawned detached via CLI):
+- `"[watch] batch indexing {count} files"` — batch flush happened.
+- `"[watch] batch reindex failed: {e}"`, `"[watch] periodic reindex failed: {e}"`.
+- `"[watch] watcher disconnected, restarting ({n}/{MAX_RESTARTS}) after {s}s"` — `MAX_RESTARTS = 3`.
+- `"[watch] watcher restarted successfully"`.
+- `"[watch] watcher died {n} times, giving up"` — **terminal**: the watch loop breaks and stops watching entirely. Requires a manual restart, nothing auto-recovers from this.
+
+Auto-resolve variant (`watch_project_auto_resolve`) additionally logs per-event: `"[watch {prefix}] {evt}"`, `"[watch {prefix}] targeted reindex: {indexed}/{total} affected files"`, `"[watch {prefix}] re-resolved: {stats}"`, `"[watch {prefix}] re-resolve failed: {e}"`, `"[watch {prefix}] updated {n} embeddings"`.
+
+**MCP-side log**: `~/.infigraph/mcp.log` (via `watch_log()` in `crates/infigraph-mcp/src/tools/watch.rs`) — `"watcher {id} auto_resolve error: {e}"`, `"watcher {id} restarted after internal failure"`, `"watcher {id} died permanently for {path}"`.
+
+**Cross-file-call warning**: `"[watch {id_short}] ⚠ cross-file calls affected — call index_project to re-resolve (or use auto_resolve=true)"` — printed when `auto_resolve=false` and a changed file has CALLS edges crossing file boundaries. This is expected behavior, not a bug: without `auto_resolve=true`, cross-file impact is only logged and stored in `pending_reindex`, never auto-applied.
+
+## `.infigraph/watch.lock` — the cross-process dedup mechanism
+
+`crates/infigraph-cli/src/index.rs::ensure_watcher_running()` opens/creates the lock file, tries `try_lock_exclusive()` (via `fs2`). Lock acquired → no watcher currently running → release + spawn one (detached: `setsid()` on Unix, `DETACHED_PROCESS` on Windows, logs to `.infigraph/watch.log`). Lock fails → a watcher is already alive → no-op.
+
+Same pattern reused in `crates/infigraph-mcp/src/tools/watch.rs` (`tool_watch_project` acquires and *holds* this lock for the watcher's lifetime — see the write-lock/watch-lock invariant in `infigraph.mdc`), `crates/infigraph-cli/src/group_commands.rs` (multi-repo watch), and `info_commands.rs` (`acquire_watch_lock()` / `cmd_watch_stop()`, which writes a `.infigraph/watch.stop` sentinel the loop polls each iteration and deletes on exit).
+
+## Concrete debugging checklist
+
+1. **"Is a watcher currently running?"** — `lsof <project>/.infigraph/watch.lock` (macOS/Linux) shows the holder PID if one exists. Or use the MCP `get_watch_status` tool — distinguishes `[code]` vs `[docs]` watchers, shows pending-reindex counts.
+2. **"Why isn't reindex happening for a changed file?"** — in order of likelihood:
+   - Check whether the file's extension is even recognized (`filter_registry.for_file(&rel).is_some()`) — unrecognized extensions are silently dropped, never enter the batch, no log line at all.
+   - Check whether the file is under an ignored directory (`should_ignore` list above).
+   - Check `.infigraph/watch.log` / `~/.infigraph/mcp.log` for batch/periodic reindex failures.
+   - If the change affects cross-file calls and `auto_resolve=false`, this is expected — see the cross-file-call warning above; it needs a manual `index_project`/`infigraph index`, not an automatic one.
+3. **"Watcher seems to have stopped entirely"** — grep for `"watcher died {n} times, giving up"` / `"died permanently"`. This means the underlying OS watch (notify crate) crashed repeatedly (e.g. directory deletion racing a kqueue watch) and gave up after `MAX_RESTARTS = 3`. Fix is to manually stop and restart the watcher (`stop_watch` then re-`watch_project`/`infigraph index`), not to wait for auto-recovery.
+4. **SCIP enrichment silently not running** — separate subsystem, not the file watcher. See `scip-enrichment.mdc`; check `.infigraph/scip-enrich.log`, not the watch logs.
+5. **FD-leak-style reports (macOS)** — check whether `notify`'s `macos_kqueue` feature is enabled anywhere in the dependency tree (Cargo feature unification can enable it project-wide even if only one crate requests it) — this was the root cause of a real FD-exhaustion incident (issue #9 in project history); FSEvents (the default backend) should be used instead.
