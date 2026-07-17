@@ -4,16 +4,14 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use tokio::runtime::Handle;
 use pgvector::Vector;
+use tokio::runtime::Handle;
 use tokio_postgres::{Client, NoTls};
 
 use crate::graph::SessionData;
 use crate::multi::{Contract, ContractKind, Group, Registry, RepoEntry};
 
-const INIT_SQL: &str = r#"
-CREATE EXTENSION IF NOT EXISTS vector;
-
+const CORE_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS repos (
     name TEXT PRIMARY KEY,
     path TEXT NOT NULL,
@@ -66,6 +64,14 @@ CREATE TABLE IF NOT EXISTS sessions (
     last_accessed BIGINT NOT NULL DEFAULT 0
 );
 
+CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_contracts_group ON contracts(group_name);
+CREATE INDEX IF NOT EXISTS idx_file_hashes_repo ON file_hashes(repo);
+"#;
+
+const VECTOR_SQL: &str = r#"
+CREATE EXTENSION IF NOT EXISTS vector;
+
 CREATE TABLE IF NOT EXISTS embeddings (
     id TEXT PRIMARY KEY,
     kind TEXT NOT NULL DEFAULT 'symbol',
@@ -74,9 +80,6 @@ CREATE TABLE IF NOT EXISTS embeddings (
 
 CREATE INDEX IF NOT EXISTS idx_embeddings_kind ON embeddings(kind);
 CREATE INDEX IF NOT EXISTS idx_embeddings_hnsw ON embeddings USING hnsw (vector vector_cosine_ops);
-CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_contracts_group ON contracts(group_name);
-CREATE INDEX IF NOT EXISTS idx_file_hashes_repo ON file_hashes(repo);
 "#;
 
 /// Postgres-backed metadata store for remote (sidecar) deployment.
@@ -95,7 +98,7 @@ impl PostgresMetaStore {
         let client = rt.block_on(async {
             let (client, connection) = tokio_postgres::connect(conn_str, NoTls)
                 .await
-                .map_err(|e| anyhow::anyhow!("postgres connect failed: {e}"))?;
+                .map_err(|e| anyhow::anyhow!("postgres connect failed: {e:?}"))?;
             tokio::spawn(async move {
                 if let Err(e) = connection.await {
                     eprintln!("postgres connection error: {e}");
@@ -117,12 +120,19 @@ impl PostgresMetaStore {
     }
 
     /// Run schema migrations (idempotent).
+    /// Core tables (repos, groups, etc.) are created first.
+    /// pgvector extension + embeddings table are created separately so a missing
+    /// pgvector package doesn't block registry operations.
     pub fn init_schema(&self) -> Result<()> {
         self.block_on(async {
             self.client
-                .batch_execute(INIT_SQL)
+                .batch_execute(CORE_SQL)
                 .await
-                .map_err(|e| anyhow::anyhow!("schema init failed: {e}"))
+                .map_err(|e| anyhow::anyhow!("core schema init failed: {e:?}"))?;
+            if let Err(e) = self.client.batch_execute(VECTOR_SQL).await {
+                eprintln!("warning: pgvector schema init failed (embeddings unavailable): {e:?}");
+            }
+            Ok(())
         })
     }
 
@@ -135,7 +145,7 @@ impl PostgresMetaStore {
             self.client
                 .execute(sql, &[])
                 .await
-                .map_err(|e| anyhow::anyhow!("execute_raw failed: {e}"))
+                .map_err(|e| anyhow::anyhow!("execute_raw failed: {e:?}"))
         })
     }
 
@@ -176,22 +186,21 @@ impl PostgresMetaStore {
                     ],
                 )
                 .await
-                .map_err(|e| anyhow::anyhow!("upsert repo failed: {e}"))
+                .map_err(|e| anyhow::anyhow!("upsert repo failed: {e:?}"))
         })?;
         Ok(())
     }
 
     fn load_repos(&self) -> Result<HashMap<String, RepoEntry>> {
-        let rows = self
-            .block_on(async {
-                self.client
-                    .query(
-                        "SELECT name, path, languages, symbol_count, module_count FROM repos",
-                        &[],
-                    )
-                    .await
-                    .map_err(|e| anyhow::anyhow!("load repos failed: {e}"))
-            })?;
+        let rows = self.block_on(async {
+            self.client
+                .query(
+                    "SELECT name, path, languages, symbol_count, module_count FROM repos",
+                    &[],
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("load repos failed: {e:?}"))
+        })?;
 
         let mut map = HashMap::new();
         for row in &rows {
@@ -216,13 +225,12 @@ impl PostgresMetaStore {
     }
 
     fn load_groups(&self) -> Result<HashMap<String, Group>> {
-        let group_rows = self
-            .block_on(async {
-                self.client
-                    .query("SELECT name FROM groups", &[])
-                    .await
-                    .map_err(|e| anyhow::anyhow!("load groups failed: {e}"))
-            })?;
+        let group_rows = self.block_on(async {
+            self.client
+                .query("SELECT name FROM groups", &[])
+                .await
+                .map_err(|e| anyhow::anyhow!("load groups failed: {e:?}"))
+        })?;
 
         let mut groups = HashMap::new();
         for row in &group_rows {
@@ -242,31 +250,29 @@ impl PostgresMetaStore {
     }
 
     fn load_group_repos(&self, group_name: &str) -> Result<Vec<String>> {
-        let rows = self
-            .block_on(async {
-                self.client
-                    .query(
-                        "SELECT repo_name FROM group_repos WHERE group_name = $1",
-                        &[&group_name],
-                    )
-                    .await
-                    .map_err(|e| anyhow::anyhow!("load group repos failed: {e}"))
-            })?;
+        let rows = self.block_on(async {
+            self.client
+                .query(
+                    "SELECT repo_name FROM group_repos WHERE group_name = $1",
+                    &[&group_name],
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("load group repos failed: {e:?}"))
+        })?;
         Ok(rows.iter().map(|r| r.get(0)).collect())
     }
 
     fn load_group_contracts(&self, group_name: &str) -> Result<Vec<Contract>> {
-        let rows = self
-            .block_on(async {
-                self.client
-                    .query(
-                        "SELECT kind, service, method, path, symbol_id, file \
+        let rows = self.block_on(async {
+            self.client
+                .query(
+                    "SELECT kind, service, method, path, symbol_id, file \
                          FROM contracts WHERE group_name = $1",
-                        &[&group_name],
-                    )
-                    .await
-                    .map_err(|e| anyhow::anyhow!("load contracts failed: {e}"))
-            })?;
+                    &[&group_name],
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("load contracts failed: {e:?}"))
+        })?;
 
         Ok(rows
             .iter()
@@ -300,17 +306,14 @@ impl PostgresMetaStore {
                     &[&name],
                 )
                 .await
-                .map_err(|e| anyhow::anyhow!("upsert group failed: {e}"))
+                .map_err(|e| anyhow::anyhow!("upsert group failed: {e:?}"))
         })?;
 
         self.block_on(async {
             self.client
-                .execute(
-                    "DELETE FROM group_repos WHERE group_name = $1",
-                    &[&name],
-                )
+                .execute("DELETE FROM group_repos WHERE group_name = $1", &[&name])
                 .await
-                .map_err(|e| anyhow::anyhow!("clear group repos failed: {e}"))
+                .map_err(|e| anyhow::anyhow!("clear group repos failed: {e:?}"))
         })?;
 
         for repo in &group.repos {
@@ -322,18 +325,15 @@ impl PostgresMetaStore {
                         &[&name, &repo.as_str()],
                     )
                     .await
-                    .map_err(|e| anyhow::anyhow!("add group repo failed: {e}"))
+                    .map_err(|e| anyhow::anyhow!("add group repo failed: {e:?}"))
             })?;
         }
 
         self.block_on(async {
             self.client
-                .execute(
-                    "DELETE FROM contracts WHERE group_name = $1",
-                    &[&name],
-                )
+                .execute("DELETE FROM contracts WHERE group_name = $1", &[&name])
                 .await
-                .map_err(|e| anyhow::anyhow!("clear contracts failed: {e}"))
+                .map_err(|e| anyhow::anyhow!("clear contracts failed: {e:?}"))
         })?;
 
         for c in &group.contracts {
@@ -360,7 +360,7 @@ impl PostgresMetaStore {
                         ],
                     )
                     .await
-                    .map_err(|e| anyhow::anyhow!("insert contract failed: {e}"))
+                    .map_err(|e| anyhow::anyhow!("insert contract failed: {e:?}"))
             })?;
         }
 
@@ -375,7 +375,7 @@ impl PostgresMetaStore {
                     &[&name],
                 )
                 .await
-                .map_err(|e| anyhow::anyhow!("create group failed: {e}"))
+                .map_err(|e| anyhow::anyhow!("create group failed: {e:?}"))
         })?;
         Ok(())
     }
@@ -389,7 +389,7 @@ impl PostgresMetaStore {
                     &[&group_name, &repo_name],
                 )
                 .await
-                .map_err(|e| anyhow::anyhow!("group add failed: {e}"))
+                .map_err(|e| anyhow::anyhow!("group add failed: {e:?}"))
         })?;
         Ok(())
     }
@@ -402,7 +402,7 @@ impl PostgresMetaStore {
                     &[&group_name, &repo_name],
                 )
                 .await
-                .map_err(|e| anyhow::anyhow!("group remove failed: {e}"))
+                .map_err(|e| anyhow::anyhow!("group remove failed: {e:?}"))
         })?;
         Ok(())
     }
@@ -410,16 +410,15 @@ impl PostgresMetaStore {
     // ── File hashes ──────────────────────────────────────────────────
 
     pub fn get_file_hashes(&self, repo: &str) -> Result<HashMap<String, String>> {
-        let rows = self
-            .block_on(async {
-                self.client
-                    .query(
-                        "SELECT file, sha256 FROM file_hashes WHERE repo = $1",
-                        &[&repo],
-                    )
-                    .await
-                    .map_err(|e| anyhow::anyhow!("get file hashes failed: {e}"))
-            })?;
+        let rows = self.block_on(async {
+            self.client
+                .query(
+                    "SELECT file, sha256 FROM file_hashes WHERE repo = $1",
+                    &[&repo],
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("get file hashes failed: {e:?}"))
+        })?;
 
         let mut map = HashMap::new();
         for row in &rows {
@@ -440,7 +439,7 @@ impl PostgresMetaStore {
                         &[&repo, &file.as_str(), &hash.as_str()],
                     )
                     .await
-                    .map_err(|e| anyhow::anyhow!("upsert file hash failed: {e}"))
+                    .map_err(|e| anyhow::anyhow!("upsert file hash failed: {e:?}"))
             })?;
         }
         Ok(())
@@ -455,7 +454,7 @@ impl PostgresMetaStore {
                         &[&repo, &file.as_str()],
                     )
                     .await
-                    .map_err(|e| anyhow::anyhow!("delete file hash failed: {e}"))
+                    .map_err(|e| anyhow::anyhow!("delete file hash failed: {e:?}"))
             })?;
         }
         Ok(())
@@ -495,43 +494,41 @@ impl PostgresMetaStore {
                     ],
                 )
                 .await
-                .map_err(|e| anyhow::anyhow!("save session failed: {e}"))
+                .map_err(|e| anyhow::anyhow!("save session failed: {e:?}"))
         })?;
         Ok(())
     }
 
     pub fn load_session(&self, session_id: &str) -> Result<Option<SessionData>> {
-        let rows = self
-            .block_on(async {
-                self.client
-                    .query(
-                        "SELECT id, name, summary, pending_tasks, decisions, files_touched, \
+        let rows = self.block_on(async {
+            self.client
+                .query(
+                    "SELECT id, name, summary, pending_tasks, decisions, files_touched, \
                          constraints_text, assumptions, blockers, confidence, created_at, \
                          updated_at, last_accessed \
                          FROM sessions WHERE id = $1",
-                        &[&session_id],
-                    )
-                    .await
-                    .map_err(|e| anyhow::anyhow!("load session failed: {e}"))
-            })?;
+                    &[&session_id],
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("load session failed: {e:?}"))
+        })?;
 
         Ok(rows.first().map(row_to_session))
     }
 
     pub fn list_sessions_recent(&self, limit: usize) -> Result<Vec<SessionData>> {
-        let rows = self
-            .block_on(async {
-                self.client
-                    .query(
-                        "SELECT id, name, summary, pending_tasks, decisions, files_touched, \
+        let rows = self.block_on(async {
+            self.client
+                .query(
+                    "SELECT id, name, summary, pending_tasks, decisions, files_touched, \
                          constraints_text, assumptions, blockers, confidence, created_at, \
                          updated_at, last_accessed \
                          FROM sessions ORDER BY updated_at DESC LIMIT $1",
-                        &[&(limit as i64)],
-                    )
-                    .await
-                    .map_err(|e| anyhow::anyhow!("list sessions failed: {e}"))
-            })?;
+                    &[&(limit as i64)],
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("list sessions failed: {e:?}"))
+        })?;
 
         Ok(rows.iter().map(row_to_session).collect())
     }
@@ -541,7 +538,7 @@ impl PostgresMetaStore {
             self.client
                 .execute("DELETE FROM sessions WHERE id = $1", &[&session_id])
                 .await
-                .map_err(|e| anyhow::anyhow!("delete session failed: {e}"))
+                .map_err(|e| anyhow::anyhow!("delete session failed: {e:?}"))
         })?;
         Ok(())
     }
@@ -554,7 +551,7 @@ impl PostgresMetaStore {
                     &[&now_epoch, &session_id],
                 )
                 .await
-                .map_err(|e| anyhow::anyhow!("touch session failed: {e}"))
+                .map_err(|e| anyhow::anyhow!("touch session failed: {e:?}"))
         })?;
         Ok(())
     }
@@ -583,12 +580,16 @@ impl PostgresMetaStore {
                     &[&id, &kind, &v],
                 )
                 .await
-                .map_err(|e| anyhow::anyhow!("upsert embedding failed: {e}"))
+                .map_err(|e| anyhow::anyhow!("upsert embedding failed: {e:?}"))
         })?;
         Ok(())
     }
 
-    pub fn upsert_embeddings_bulk(&self, embeddings: &[(String, Vec<f32>)], kind: &str) -> Result<usize> {
+    pub fn upsert_embeddings_bulk(
+        &self,
+        embeddings: &[(String, Vec<f32>)],
+        kind: &str,
+    ) -> Result<usize> {
         if embeddings.is_empty() {
             return Ok(0);
         }
@@ -599,7 +600,7 @@ impl PostgresMetaStore {
                      ON CONFLICT (id) DO UPDATE SET kind = EXCLUDED.kind, vector = EXCLUDED.vector",
                 )
                 .await
-                .map_err(|e| anyhow::anyhow!("prepare upsert failed: {e}"))
+                .map_err(|e| anyhow::anyhow!("prepare upsert failed: {e:?}"))
         })?;
         let mut total = 0usize;
         for (id, vec) in embeddings {
@@ -608,7 +609,7 @@ impl PostgresMetaStore {
                 self.client
                     .execute(&stmt, &[&id, &kind, &v])
                     .await
-                    .map_err(|e| anyhow::anyhow!("upsert embedding failed: {e}"))
+                    .map_err(|e| anyhow::anyhow!("upsert embedding failed: {e:?}"))
             })?;
             total += 1;
         }
@@ -616,16 +617,12 @@ impl PostgresMetaStore {
     }
 
     pub fn get_embedding(&self, id: &str) -> Result<Option<Vec<f32>>> {
-        let rows = self
-            .block_on(async {
-                self.client
-                    .query(
-                        "SELECT vector FROM embeddings WHERE id = $1",
-                        &[&id],
-                    )
-                    .await
-                    .map_err(|e| anyhow::anyhow!("get embedding failed: {e}"))
-            })?;
+        let rows = self.block_on(async {
+            self.client
+                .query("SELECT vector FROM embeddings WHERE id = $1", &[&id])
+                .await
+                .map_err(|e| anyhow::anyhow!("get embedding failed: {e:?}"))
+        })?;
         Ok(rows.first().map(|r| {
             let v: Vector = r.get(0);
             v.to_vec()
@@ -639,14 +636,19 @@ impl PostgresMetaStore {
         const BATCH: usize = 500;
         for chunk in ids.chunks(BATCH) {
             let placeholders: Vec<String> = (1..=chunk.len()).map(|i| format!("${}", i)).collect();
-            let sql = format!("DELETE FROM embeddings WHERE id IN ({})", placeholders.join(", "));
-            let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
-                chunk.iter().map(|s| s as &(dyn tokio_postgres::types::ToSql + Sync)).collect();
+            let sql = format!(
+                "DELETE FROM embeddings WHERE id IN ({})",
+                placeholders.join(", ")
+            );
+            let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = chunk
+                .iter()
+                .map(|s| s as &(dyn tokio_postgres::types::ToSql + Sync))
+                .collect();
             self.block_on(async {
                 self.client
                     .execute(&sql, &params)
                     .await
-                    .map_err(|e| anyhow::anyhow!("delete embeddings failed: {e}"))
+                    .map_err(|e| anyhow::anyhow!("delete embeddings failed: {e:?}"))
             })?;
         }
         Ok(())
@@ -660,18 +662,17 @@ impl PostgresMetaStore {
         limit: usize,
     ) -> Result<Vec<(String, f32)>> {
         let qv = Vector::from(query_vec.to_vec());
-        let rows = self
-            .block_on(async {
-                self.client
-                    .query(
-                        "SELECT id, vector <=> $1 AS distance \
+        let rows = self.block_on(async {
+            self.client
+                .query(
+                    "SELECT id, vector <=> $1 AS distance \
                          FROM embeddings WHERE kind = $2 \
                          ORDER BY vector <=> $1 LIMIT $3",
-                        &[&qv, &kind, &(limit as i64)],
-                    )
-                    .await
-                    .map_err(|e| anyhow::anyhow!("search nearest failed: {e}"))
-            })?;
+                    &[&qv, &kind, &(limit as i64)],
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("search nearest failed: {e:?}"))
+        })?;
 
         Ok(rows
             .iter()
@@ -684,16 +685,15 @@ impl PostgresMetaStore {
     }
 
     pub fn all_embeddings(&self, kind: &str) -> Result<Vec<(String, Vec<f32>)>> {
-        let rows = self
-            .block_on(async {
-                self.client
-                    .query(
-                        "SELECT id, vector FROM embeddings WHERE kind = $1",
-                        &[&kind],
-                    )
-                    .await
-                    .map_err(|e| anyhow::anyhow!("all embeddings failed: {e}"))
-            })?;
+        let rows = self.block_on(async {
+            self.client
+                .query(
+                    "SELECT id, vector FROM embeddings WHERE kind = $1",
+                    &[&kind],
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("all embeddings failed: {e:?}"))
+        })?;
         Ok(rows
             .iter()
             .map(|r| {

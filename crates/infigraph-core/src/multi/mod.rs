@@ -71,6 +71,7 @@ impl Registry {
         {
             if is_remote_mode() {
                 let pg = PostgresMetaStore::connect_from_env()?;
+                pg.init_schema()?;
                 return pg.load_registry();
             }
         }
@@ -89,6 +90,7 @@ impl Registry {
         {
             if is_remote_mode() {
                 let pg = PostgresMetaStore::connect_from_env()?;
+                pg.init_schema()?;
                 return pg.save_registry(self);
             }
         }
@@ -224,7 +226,8 @@ pub fn extract_contracts(prism: &Infigraph, service_name: &str) -> Result<Vec<Co
     let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // 1. Route symbols (call-expression routes: Express, Gin, Django, etc.)
-    let route_rows = raw_query_prism(prism,
+    let route_rows = raw_query_prism(
+        prism,
         "MATCH (s:Symbol) WHERE s.kind = 'Route' RETURN s.id, s.name, s.kind, s.file, s.docstring",
     )?;
     for row in &route_rows {
@@ -437,8 +440,8 @@ pub fn sync_group_contracts(
         all_contracts.extend(contracts);
 
         // Collect dependency names while graph is open
-        let dep_rows = raw_query_prism(&prism, "MATCH (d:Dependency) RETURN d.name")
-            .unwrap_or_default();
+        let dep_rows =
+            raw_query_prism(&prism, "MATCH (d:Dependency) RETURN d.name").unwrap_or_default();
         let dep_names: Vec<String> = dep_rows
             .into_iter()
             .filter_map(|r| r.into_iter().next())
@@ -520,20 +523,29 @@ pub fn index_group(
         .map(|v| v == "neo4j")
         .unwrap_or(false);
 
-    let index_one = |repo_name: &str, entry: &RepoEntry| -> Result<(String, usize, usize, Infigraph)> {
-        let lang_registry = build_registry()?;
-        let mut prism = Infigraph::open(&entry.path, lang_registry)?;
-        prism.init()?;
-        if prism.backend().is_some() {
-            prism.set_namespace(repo_name);
-        }
-        let result = prism.index()?;
-        Ok((repo_name.to_string(), result.indexed_files, result.total_files, prism))
-    };
+    let index_one =
+        |repo_name: &str, entry: &RepoEntry| -> Result<(String, usize, usize, Infigraph)> {
+            let lang_registry = build_registry()?;
+            let mut prism = Infigraph::open(&entry.path, lang_registry)?;
+            prism.init()?;
+            if prism.backend().is_some() {
+                prism.set_namespace(repo_name);
+            }
+            let result = prism.index()?;
+            Ok((
+                repo_name.to_string(),
+                result.indexed_files,
+                result.total_files,
+                prism,
+            ))
+        };
 
     let indexed: Vec<Result<(String, usize, usize, Infigraph)>> = if use_parallel {
         use rayon::prelude::*;
-        eprintln!("[group] parallel indexing {} repos via Neo4j backend", entries.len());
+        eprintln!(
+            "[group] parallel indexing {} repos via Neo4j backend",
+            entries.len()
+        );
         entries
             .par_iter()
             .map(|(name, entry)| index_one(name, entry))
