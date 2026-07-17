@@ -46,4 +46,4 @@ Don't assume a PR closes an issue just because its description says "Fixes #N" �
 
 ## 5. Report format
 
-Per PR: root-cause match (yes/no/partial), which specific sub-defects it closes vs. leaves open, any gaps in the fix itself (e.g. errors still silently discarded). Then an overall verdict: will merging all of them actually let you close the issue(s), or does the issue need to stay open / get rescoped to a checklist matching only what's fixed.
+Per PR: root-cause match (yes/no/partial), which specific sub-defects it closes vs. leaves open, any gaps in the fix itself. Then an overall verdict — will merging all of them actually close the issue(s), or does it need to stay open / get rescoped to a checklist matching only what's fixed — with a confidence and recommendation per the repo's working convention.
