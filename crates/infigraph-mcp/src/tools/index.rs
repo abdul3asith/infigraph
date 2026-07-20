@@ -7,6 +7,13 @@ use super::docs::auto_start_doc_watch_opportunistic as auto_start_doc_watch;
 use super::helpers::{find_infigraph_cli, open_prism};
 use super::watch::auto_start_watch_opportunistic as auto_start_watch;
 
+#[cfg(feature = "remote")]
+fn is_remote_mode() -> bool {
+    std::env::var("INFIGRAPH_BACKEND")
+        .map(|v| v == "neo4j")
+        .unwrap_or(false)
+}
+
 pub fn tool_index_project(args: &Value) -> Result<String> {
     let path = args.get("path").and_then(|p| p.as_str()).unwrap_or(".");
     let full = args.get("full").and_then(|f| f.as_bool()).unwrap_or(false);
@@ -84,9 +91,25 @@ pub fn tool_index_project(args: &Value) -> Result<String> {
     if let Some(backend) = prism.backend() {
         let root = std::path::PathBuf::from(path);
         let changed: Vec<&str> = result.extractions.iter().map(|e| e.file.as_str()).collect();
-        match embed::update_embeddings(backend, &root, &changed) {
-            Ok(n) => out.push_str(&format!("Saved {} embeddings\n", n)),
-            Err(e) => out.push_str(&format!("warning: embedding update failed: {e}\n")),
+        #[allow(unused_mut)]
+        let mut embed_done = false;
+        #[cfg(feature = "remote")]
+        if is_remote_mode() {
+            if let Ok(pg) = infigraph_core::meta::PostgresMetaStore::connect_from_env_cached() {
+                match embed::update_embeddings_remote(backend, pg, &changed) {
+                    Ok(n) => out.push_str(&format!("Saved {} embeddings to pgvector\n", n)),
+                    Err(e) => {
+                        out.push_str(&format!("warning: remote embedding update failed: {e}\n"))
+                    }
+                }
+                embed_done = true;
+            }
+        }
+        if !embed_done {
+            match embed::update_embeddings(backend, &root, &changed) {
+                Ok(n) => out.push_str(&format!("Saved {} embeddings\n", n)),
+                Err(e) => out.push_str(&format!("warning: embedding update failed: {e}\n")),
+            }
         }
     }
     let stats = prism.stats()?;

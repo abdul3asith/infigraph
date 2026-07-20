@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 use pgvector::Vector;
@@ -10,6 +11,8 @@ use tokio_postgres::{Client, NoTls};
 
 use crate::graph::SessionData;
 use crate::multi::{Contract, ContractKind, Group, Registry, RepoEntry};
+
+static PG_CONN: OnceLock<PostgresMetaStore> = OnceLock::new();
 
 const CORE_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS repos (
@@ -165,6 +168,19 @@ impl PostgresMetaStore {
             "host=localhost user=infigraph password=infigraph dbname=infigraph".into()
         });
         Self::connect(&url)
+    }
+
+    /// Cached connection — creates once, reuses across all callers.
+    /// Avoids per-call runtime leak from `connect_from_env()`.
+    pub fn connect_from_env_cached() -> Result<&'static Self> {
+        if let Some(store) = PG_CONN.get() {
+            return Ok(store);
+        }
+        let store = Self::connect_from_env()?;
+        let _ = PG_CONN.set(store);
+        PG_CONN
+            .get()
+            .ok_or_else(|| anyhow::anyhow!("PG_CONN OnceLock unexpectedly empty"))
     }
 
     /// Run schema migrations (idempotent).

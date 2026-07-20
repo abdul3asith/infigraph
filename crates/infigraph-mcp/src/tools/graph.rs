@@ -73,7 +73,11 @@ pub fn tool_get_code_snippet(args: &Value) -> Result<String> {
         .find_symbol_by_id(symbol_id)?
         .context(format!("symbol '{}' not found in graph", symbol_id))?;
 
-    let file_path = prism.root().join(&detail.file);
+    let file_path = if std::path::Path::new(&detail.file).is_absolute() {
+        PathBuf::from(&detail.file)
+    } else {
+        prism.root().join(&detail.file)
+    };
     let snippet = infigraph_core::search::read_lines_from_file(
         &file_path,
         detail.start_line,
@@ -553,7 +557,11 @@ pub fn tool_get_doc_context(args: &Value) -> Result<String> {
         }
     }
 
-    let file_path = prism.root().join(&detail.file);
+    let file_path = if std::path::Path::new(&detail.file).is_absolute() {
+        PathBuf::from(&detail.file)
+    } else {
+        prism.root().join(&detail.file)
+    };
     if let Ok(source) = std::fs::read_to_string(&file_path) {
         let lines: Vec<&str> = source.lines().collect();
         let start = (detail.start_line as usize).saturating_sub(1);
@@ -730,7 +738,11 @@ pub fn tool_generate_test_context(args: &Value) -> Result<String> {
             "  {} — {}:{}-{}\n",
             ex.name, ex.file, ex.start_line, ex.end_line
         ));
-        let file_path = prism.root().join(&ex.file);
+        let file_path = if std::path::Path::new(&ex.file).is_absolute() {
+            PathBuf::from(&ex.file)
+        } else {
+            prism.root().join(&ex.file)
+        };
         if let Ok(source) = std::fs::read_to_string(&file_path) {
             let lines: Vec<&str> = source.lines().collect();
             let start = (ex.start_line as usize).saturating_sub(1);
@@ -794,7 +806,11 @@ pub fn tool_generate_test_context(args: &Value) -> Result<String> {
             }
         }
 
-        let file_path = prism.root().join(&t.file);
+        let file_path = if std::path::Path::new(&t.file).is_absolute() {
+            PathBuf::from(&t.file)
+        } else {
+            prism.root().join(&t.file)
+        };
         if let Ok(source) = std::fs::read_to_string(&file_path) {
             let lines: Vec<&str> = source.lines().collect();
             let start = (t.start_line as usize).saturating_sub(1);

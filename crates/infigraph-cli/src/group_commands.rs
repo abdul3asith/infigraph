@@ -363,7 +363,8 @@ pub(crate) fn cmd_group(root: &Path, action: GroupAction) -> Result<()> {
                 #[cfg(feature = "remote")]
                 if is_remote {
                     if let Some(store) = idx.store() {
-                        let pg = infigraph_core::meta::PostgresMetaStore::connect_from_env()?;
+                        let pg =
+                            infigraph_core::meta::PostgresMetaStore::connect_from_env_cached()?;
                         pg.init_schema()?;
                         let chunk_refs: Vec<&infigraph_docs::chunk::Chunk> =
                             result.new_chunks.iter().collect();

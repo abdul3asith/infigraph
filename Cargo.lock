@@ -2417,7 +2417,7 @@ dependencies = [
 
 [[package]]
 name = "infigraph-cli"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2445,7 +2445,7 @@ dependencies = [
 
 [[package]]
 name = "infigraph-confluence"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2459,7 +2459,7 @@ dependencies = [
 
 [[package]]
 name = "infigraph-core"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -2497,7 +2497,7 @@ dependencies = [
 
 [[package]]
 name = "infigraph-docs"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -2506,6 +2506,7 @@ dependencies = [
  "fs2",
  "infigraph-core",
  "lbug",
+ "neo4rs",
  "notify",
  "parquet",
  "pdf_oxide",
@@ -2516,12 +2517,13 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
+ "tokio",
  "zip 2.4.2",
 ]
 
 [[package]]
 name = "infigraph-grammar-plugin"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "anyhow",
  "dirs-next",
@@ -2534,7 +2536,7 @@ dependencies = [
 
 [[package]]
 name = "infigraph-languages"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "anyhow",
  "infigraph-core",
@@ -2602,7 +2604,7 @@ dependencies = [
 
 [[package]]
 name = "infigraph-mcp"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "anyhow",
  "fs2",
@@ -2627,7 +2629,7 @@ dependencies = [
 
 [[package]]
 name = "infigraph-pipeline-plugin"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "anyhow",
  "dirs-next",
@@ -3004,7 +3006,7 @@ checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
 name = "lsp-to-scip"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "anyhow",
  "clap",

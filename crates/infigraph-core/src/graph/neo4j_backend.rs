@@ -1,6 +1,7 @@
 #![cfg(feature = "neo4j")]
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 use neo4rs::{query, Graph, Query};
@@ -19,6 +20,24 @@ use super::{
 
 const BATCH_SIZE: usize = 1000;
 
+static NEO4J_CONN: OnceLock<(Graph, Handle)> = OnceLock::new();
+
+fn get_or_init_connection(uri: &str, user: &str, password: &str) -> Result<(Graph, Handle)> {
+    if let Some((g, h)) = NEO4J_CONN.get() {
+        return Ok((g.clone(), h.clone()));
+    }
+    let rt = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
+    let graph = rt.block_on(async {
+        Graph::new(uri, user, password)
+            .await
+            .map_err(|e| anyhow::anyhow!("neo4j connect failed: {e}"))
+    })?;
+    let handle = rt.handle().clone();
+    std::mem::forget(rt);
+    let _ = NEO4J_CONN.set((graph.clone(), handle.clone()));
+    Ok((graph, handle))
+}
+
 /// Neo4j-backed graph storage (remote, sidecar mode).
 ///
 /// Connects to a Neo4j Community sidecar via Bolt protocol.
@@ -33,14 +52,7 @@ impl Neo4jBackend {
     /// Connect to Neo4j at the given Bolt URI.
     /// Defaults: `bolt://localhost:7687`, user `neo4j`, password `infigraph`.
     pub fn connect(uri: &str, user: &str, password: &str) -> Result<Self> {
-        let rt = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
-        let graph = rt.block_on(async {
-            Graph::new(uri, user, password)
-                .await
-                .map_err(|e| anyhow::anyhow!("neo4j connect failed: {e}"))
-        })?;
-        let handle = rt.handle().clone();
-        std::mem::forget(rt);
+        let (graph, handle) = get_or_init_connection(uri, user, password)?;
         Ok(Self { graph, handle })
     }
 

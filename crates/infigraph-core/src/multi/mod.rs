@@ -73,7 +73,7 @@ impl Registry {
         #[cfg(feature = "postgres")]
         {
             if is_remote_mode() {
-                let pg = PostgresMetaStore::connect_from_env()?;
+                let pg = PostgresMetaStore::connect_from_env_cached()?;
                 pg.init_schema()?;
                 return pg.load_registry();
             }
@@ -92,7 +92,7 @@ impl Registry {
         #[cfg(feature = "postgres")]
         {
             if is_remote_mode() {
-                let pg = PostgresMetaStore::connect_from_env()?;
+                let pg = PostgresMetaStore::connect_from_env_cached()?;
                 pg.init_schema()?;
                 return pg.save_registry(self);
             }

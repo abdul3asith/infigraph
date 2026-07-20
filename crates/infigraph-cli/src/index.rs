@@ -220,7 +220,7 @@ pub(crate) fn cmd_index(root: &Path, full: bool, no_embed: bool) -> Result<()> {
         #[cfg(feature = "remote")]
         if is_neo4j_backend() {
             let backend = prism.backend().context("graph not initialized")?;
-            let pg = infigraph_core::meta::PostgresMetaStore::connect_from_env()?;
+            let pg = infigraph_core::meta::PostgresMetaStore::connect_from_env_cached()?;
             pg.init_schema()?;
             let count = infigraph_core::embed::update_embeddings_remote(backend, &pg, &changed)?;
             println!("Saved {} embeddings to Postgres pgvector", count);
@@ -795,14 +795,35 @@ fn auto_scip_background(root: &Path, detected_languages: &std::collections::Hash
     let Some(backend) = prism.backend() else {
         return;
     };
-    match infigraph_core::embed::update_embeddings(backend, &root_buf, &[]) {
-        Ok(n) => {
-            let new = n.saturating_sub(pre_count);
-            if new > 0 {
-                eprintln!("Auto-SCIP: embedded {new} new symbols from SCIP enrichment");
+    #[allow(unused_mut)]
+    let mut done = false;
+    #[cfg(feature = "remote")]
+    if is_neo4j_backend() {
+        if let Ok(pg) = infigraph_core::meta::PostgresMetaStore::connect_from_env_cached() {
+            match infigraph_core::embed::update_embeddings_remote(backend, pg, &[]) {
+                Ok(n) => {
+                    let new = n.saturating_sub(pre_count);
+                    if new > 0 {
+                        eprintln!(
+                            "Auto-SCIP: embedded {new} new symbols to pgvector from SCIP enrichment"
+                        );
+                    }
+                }
+                Err(e) => eprintln!("Auto-SCIP: remote embedding update failed: {e}"),
             }
+            done = true;
         }
-        Err(e) => eprintln!("Auto-SCIP: embedding update failed: {e}"),
+    }
+    if !done {
+        match infigraph_core::embed::update_embeddings(backend, &root_buf, &[]) {
+            Ok(n) => {
+                let new = n.saturating_sub(pre_count);
+                if new > 0 {
+                    eprintln!("Auto-SCIP: embedded {new} new symbols from SCIP enrichment");
+                }
+            }
+            Err(e) => eprintln!("Auto-SCIP: embedding update failed: {e}"),
+        }
     }
 
     eprintln!("Auto-SCIP: background enrichment complete.");
