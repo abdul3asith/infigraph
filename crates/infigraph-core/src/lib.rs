@@ -318,6 +318,15 @@ impl Infigraph {
         self.namespace = Some(ns.to_string());
     }
 
+    /// Scope Neo4j read queries to a single repo by its directory name.
+    /// No-op for Kuzu (single-repo by design).
+    #[cfg(feature = "neo4j")]
+    pub fn set_repo_filter(&mut self, repo: &str) {
+        if let BackendKind::Neo4j(ref mut neo) = self.backend_kind {
+            neo.set_repo_filter(repo);
+        }
+    }
+
     /// Index (or re-index) a single file by its path on disk.
     /// Path may be absolute or relative to project root.
     pub fn index_file(&self, path: &Path) -> Result<()> {

@@ -73,6 +73,11 @@ impl Neo4jDocStore {
         Ok(())
     }
 
+    #[doc(hidden)]
+    pub fn clear_all(&self) -> Result<()> {
+        self.run_void("MATCH (n) WHERE n:Document OR n:Chunk OR n:Source OR n:PipelineCore OR n:PluginProps DETACH DELETE n")
+    }
+
     fn block_on<F: std::future::Future>(&self, f: F) -> F::Output {
         self.handle.block_on(f)
     }

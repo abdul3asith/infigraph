@@ -46,6 +46,7 @@ fn get_or_init_connection(uri: &str, user: &str, password: &str) -> Result<(Grap
 pub struct Neo4jBackend {
     graph: Graph,
     handle: Handle,
+    repo_filter: Option<String>,
 }
 
 impl Neo4jBackend {
@@ -53,7 +54,11 @@ impl Neo4jBackend {
     /// Defaults: `bolt://localhost:7687`, user `neo4j`, password `infigraph`.
     pub fn connect(uri: &str, user: &str, password: &str) -> Result<Self> {
         let (graph, handle) = get_or_init_connection(uri, user, password)?;
-        Ok(Self { graph, handle })
+        Ok(Self {
+            graph,
+            handle,
+            repo_filter: None,
+        })
     }
 
     /// Connect using environment variables.
@@ -64,6 +69,10 @@ impl Neo4jBackend {
         let user = std::env::var("NEO4J_USER").unwrap_or_else(|_| "neo4j".to_string());
         let password = std::env::var("NEO4J_PASSWORD").unwrap_or_else(|_| "infigraph".to_string());
         Self::connect(&uri, &user, &password)
+    }
+
+    pub fn set_repo_filter(&mut self, repo: &str) {
+        self.repo_filter = Some(repo.to_string());
     }
 
     /// Initialize schema constraints (idempotent).
@@ -87,6 +96,10 @@ impl Neo4jBackend {
         self.run_void("CREATE INDEX symbol_name IF NOT EXISTS FOR (s:Symbol) ON (s.name)")?;
         self.run_void("CREATE INDEX file_repo IF NOT EXISTS FOR (f:File) ON (f.repo)")?;
         Ok(())
+    }
+
+    fn repo_filter(&self) -> Option<&str> {
+        self.repo_filter.as_deref()
     }
 
     fn block_on<F: std::future::Future>(&self, f: F) -> F::Output {
@@ -472,6 +485,28 @@ fn extract_column_name(expr: &str) -> String {
 
 impl GraphBackend for Neo4jBackend {
     fn stats(&self) -> Result<GraphStats> {
+        if let Some(repo) = self.repo_filter() {
+            let r = escape(repo);
+            return Ok(GraphStats {
+                symbols: self.count_query(&format!(
+                    "MATCH (f:File {{repo: '{r}'}})-[:DEFINES]->(s:Symbol) RETURN count(s) AS c"
+                ), "c")?,
+                modules: self.count_query(&format!(
+                    "MATCH (m:Module) WHERE EXISTS {{ MATCH (f:File {{repo: '{r}'}}) WHERE f.id = m.file }} RETURN count(m) AS c"
+                ), "c")?,
+                files: self.count_query(&format!(
+                    "MATCH (f:File {{repo: '{r}'}}) RETURN count(f) AS c"
+                ), "c")?,
+                folders: self.count_query("MATCH (d:Folder) RETURN count(d) AS c", "c")?,
+                calls: self.count_query(&format!(
+                    "MATCH (f:File {{repo: '{r}'}})-[:DEFINES]->(a:Symbol)-[r2:CALLS]->(b:Symbol) RETURN count(r2) AS c"
+                ), "c")?,
+                inherits: self.count_query(&format!(
+                    "MATCH (f:File {{repo: '{r}'}})-[:DEFINES]->(a:Symbol)-[r2:INHERITS]->(b:Symbol) RETURN count(r2) AS c"
+                ), "c")?,
+                contains: self.count_query("MATCH ()-[r:CONTAINS]->() RETURN count(r) AS c", "c")?,
+            });
+        }
         Ok(GraphStats {
             symbols: self.count_query("MATCH (s:Symbol) RETURN count(s) AS c", "c")?,
             modules: self.count_query("MATCH (m:Module) RETURN count(m) AS c", "c")?,
@@ -484,9 +519,16 @@ impl GraphBackend for Neo4jBackend {
     }
 
     fn get_file_hashes(&self) -> Result<HashMap<String, String>> {
-        let rows = self.run_query(query(
-            "MATCH (m:Module) RETURN m.file AS file, m.content_hash AS hash",
-        ))?;
+        let q = if let Some(repo) = self.repo_filter() {
+            let r = escape(repo);
+            query(&format!(
+                "MATCH (m:Module) WHERE EXISTS {{ MATCH (f:File {{repo: '{r}'}}) WHERE f.id = m.file }} \
+                 RETURN m.file AS file, m.content_hash AS hash"
+            ))
+        } else {
+            query("MATCH (m:Module) RETURN m.file AS file, m.content_hash AS hash")
+        };
+        let rows = self.run_query(q)?;
         let mut map = HashMap::new();
         for row in &rows {
             if let (Ok(file), Ok(hash)) = (row.get::<String>("file"), row.get::<String>("hash")) {
@@ -497,9 +539,16 @@ impl GraphBackend for Neo4jBackend {
     }
 
     fn get_all_symbols(&self) -> Result<Vec<(String, String, String, String)>> {
-        let rows = self.run_query(query(
-            "MATCH (s:Symbol) RETURN s.name AS name, s.id AS id, s.file AS file, s.kind AS kind",
-        ))?;
+        let q = if let Some(repo) = self.repo_filter() {
+            let r = escape(repo);
+            query(&format!(
+                "MATCH (f:File {{repo: '{r}'}})-[:DEFINES]->(s:Symbol) \
+                 RETURN s.name AS name, s.id AS id, s.file AS file, s.kind AS kind"
+            ))
+        } else {
+            query("MATCH (s:Symbol) RETURN s.name AS name, s.id AS id, s.file AS file, s.kind AS kind")
+        };
+        let rows = self.run_query(q)?;
         let mut symbols = Vec::new();
         for row in &rows {
             if let (Ok(name), Ok(id), Ok(file), Ok(kind)) = (
@@ -730,13 +779,25 @@ impl GraphBackend for Neo4jBackend {
     }
 
     fn get_api_surface(&self) -> Result<Vec<ApiSymbol>> {
-        let rows = self.run_query(query(
-            "MATCH (s:Symbol) WHERE s.visibility = 'public' \
-             RETURN s.id AS id, s.name AS name, s.kind AS kind, \
-                    s.file AS file, s.start_line AS line, \
-                    s.visibility AS visibility, s.docstring AS docstring \
-             ORDER BY s.file, s.start_line",
-        ))?;
+        let q = if let Some(repo) = self.repo_filter() {
+            let r = escape(repo);
+            query(&format!(
+                "MATCH (f:File {{repo: '{r}'}})-[:DEFINES]->(s:Symbol) WHERE s.visibility = 'public' \
+                 RETURN s.id AS id, s.name AS name, s.kind AS kind, \
+                        s.file AS file, s.start_line AS line, \
+                        s.visibility AS visibility, s.docstring AS docstring \
+                 ORDER BY s.file, s.start_line"
+            ))
+        } else {
+            query(
+                "MATCH (s:Symbol) WHERE s.visibility = 'public' \
+                 RETURN s.id AS id, s.name AS name, s.kind AS kind, \
+                        s.file AS file, s.start_line AS line, \
+                        s.visibility AS visibility, s.docstring AS docstring \
+                 ORDER BY s.file, s.start_line",
+            )
+        };
+        let rows = self.run_query(q)?;
         Ok(rows
             .iter()
             .filter_map(|r| {
@@ -816,17 +877,36 @@ impl GraphBackend for Neo4jBackend {
     }
 
     fn get_test_coverage(&self) -> Result<TestCoverage> {
-        let covered_rows = self.run_query(query(
-            "MATCH (s:Symbol)<-[:TESTED_BY]-(t:Symbol) \
-             RETURN s.id AS symbol_id, s.name AS symbol_name, s.kind AS kind, \
-                    s.file AS file, t.id AS test_id",
-        ))?;
-
-        let uncovered_rows = self.run_query(query(
-            "MATCH (s:Symbol) WHERE s.kind IN ['Function', 'Method'] \
-             AND NOT (s)<-[:TESTED_BY]-() \
-             RETURN s.id AS symbol_id, s.name AS symbol_name, s.kind AS kind, s.file AS file",
-        ))?;
+        let (covered_q, uncovered_q) = if let Some(repo) = self.repo_filter() {
+            let r = escape(repo);
+            (
+                query(&format!(
+                    "MATCH (fi:File {{repo: '{r}'}})-[:DEFINES]->(s:Symbol)<-[:TESTED_BY]-(t:Symbol) \
+                     RETURN s.id AS symbol_id, s.name AS symbol_name, s.kind AS kind, \
+                            s.file AS file, t.id AS test_id"
+                )),
+                query(&format!(
+                    "MATCH (fi:File {{repo: '{r}'}})-[:DEFINES]->(s:Symbol) \
+                     WHERE s.kind IN ['Function', 'Method'] AND NOT (s)<-[:TESTED_BY]-() \
+                     RETURN s.id AS symbol_id, s.name AS symbol_name, s.kind AS kind, s.file AS file"
+                )),
+            )
+        } else {
+            (
+                query(
+                    "MATCH (s:Symbol)<-[:TESTED_BY]-(t:Symbol) \
+                     RETURN s.id AS symbol_id, s.name AS symbol_name, s.kind AS kind, \
+                            s.file AS file, t.id AS test_id",
+                ),
+                query(
+                    "MATCH (s:Symbol) WHERE s.kind IN ['Function', 'Method'] \
+                     AND NOT (s)<-[:TESTED_BY]-() \
+                     RETURN s.id AS symbol_id, s.name AS symbol_name, s.kind AS kind, s.file AS file",
+                ),
+            )
+        };
+        let covered_rows = self.run_query(covered_q)?;
+        let uncovered_rows = self.run_query(uncovered_q)?;
 
         let covered: Vec<super::CoverageRow> = covered_rows
             .iter()
@@ -898,12 +978,23 @@ impl GraphBackend for Neo4jBackend {
     }
 
     fn get_symbols_for_search(&self) -> Result<Vec<Vec<String>>> {
-        let rows = self.run_query(query(
-            "MATCH (s:Symbol) \
-             RETURN s.id AS id, s.name AS name, s.kind AS kind, \
-                    s.file AS file, s.docstring AS docstring, \
-                    s.start_line AS start_line, s.end_line AS end_line",
-        ))?;
+        let q = if let Some(repo) = self.repo_filter() {
+            let r = escape(repo);
+            query(&format!(
+                "MATCH (f:File {{repo: '{r}'}})-[:DEFINES]->(s:Symbol) \
+                 RETURN s.id AS id, s.name AS name, s.kind AS kind, \
+                        s.file AS file, s.docstring AS docstring, \
+                        s.start_line AS start_line, s.end_line AS end_line"
+            ))
+        } else {
+            query(
+                "MATCH (s:Symbol) \
+                 RETURN s.id AS id, s.name AS name, s.kind AS kind, \
+                        s.file AS file, s.docstring AS docstring, \
+                        s.start_line AS start_line, s.end_line AS end_line",
+            )
+        };
+        let rows = self.run_query(q)?;
         Ok(rows
             .iter()
             .map(|r| {
@@ -967,21 +1058,41 @@ impl GraphBackend for Neo4jBackend {
     }
 
     fn get_complexity_ranking(&self, file_filter: Option<&str>) -> Result<Vec<ComplexityRow>> {
-        let cypher = if file_filter.is_some() {
-            "MATCH (s:Symbol) \
-             WHERE s.kind IN ['Function', 'Method', 'Test'] AND s.file CONTAINS $file \
-             RETURN s.name AS name, s.file AS file, s.start_line AS start_line, s.complexity AS complexity \
-             ORDER BY s.complexity DESC"
-        } else {
-            "MATCH (s:Symbol) \
-             WHERE s.kind IN ['Function', 'Method', 'Test'] \
-             RETURN s.name AS name, s.file AS file, s.start_line AS start_line, s.complexity AS complexity \
-             ORDER BY s.complexity DESC"
-        };
-        let q = if let Some(f) = file_filter {
-            query(cypher).param("file", f)
-        } else {
-            query(cypher)
+        let q = match (self.repo_filter(), file_filter) {
+            (Some(repo), Some(f)) => {
+                let r = escape(repo);
+                query(&format!(
+                    "MATCH (fi:File {{repo: '{r}'}})-[:DEFINES]->(s:Symbol) \
+                     WHERE s.kind IN ['Function', 'Method', 'Test'] AND s.file CONTAINS $file \
+                     RETURN s.name AS name, s.file AS file, s.start_line AS start_line, s.complexity AS complexity \
+                     ORDER BY s.complexity DESC"
+                )).param("file", f)
+            }
+            (Some(repo), None) => {
+                let r = escape(repo);
+                query(&format!(
+                    "MATCH (fi:File {{repo: '{r}'}})-[:DEFINES]->(s:Symbol) \
+                     WHERE s.kind IN ['Function', 'Method', 'Test'] \
+                     RETURN s.name AS name, s.file AS file, s.start_line AS start_line, s.complexity AS complexity \
+                     ORDER BY s.complexity DESC"
+                ))
+            }
+            (None, Some(f)) => {
+                query(
+                    "MATCH (s:Symbol) \
+                     WHERE s.kind IN ['Function', 'Method', 'Test'] AND s.file CONTAINS $file \
+                     RETURN s.name AS name, s.file AS file, s.start_line AS start_line, s.complexity AS complexity \
+                     ORDER BY s.complexity DESC"
+                ).param("file", f)
+            }
+            (None, None) => {
+                query(
+                    "MATCH (s:Symbol) \
+                     WHERE s.kind IN ['Function', 'Method', 'Test'] \
+                     RETURN s.name AS name, s.file AS file, s.start_line AS start_line, s.complexity AS complexity \
+                     ORDER BY s.complexity DESC"
+                )
+            }
         };
         let rows = self.run_query(q)?;
         Ok(rows
@@ -996,6 +1107,13 @@ impl GraphBackend for Neo4jBackend {
     }
 
     fn list_indexed_files(&self) -> Result<Vec<String>> {
+        if let Some(repo) = self.repo_filter() {
+            let r = escape(repo);
+            return self.collect_strings(
+                &format!("MATCH (f:File {{repo: '{r}'}})-[:DEFINES]->(s:Symbol) RETURN DISTINCT s.file AS f ORDER BY f"),
+                "f",
+            );
+        }
         self.collect_strings(
             "MATCH (s:Symbol) RETURN DISTINCT s.file AS f ORDER BY f",
             "f",
@@ -1003,12 +1121,23 @@ impl GraphBackend for Neo4jBackend {
     }
 
     fn find_uncalled_symbols(&self) -> Result<Vec<DeadCodeRow>> {
-        let rows = self.run_query(query(
-            "MATCH (s:Symbol) \
-             WHERE s.kind IN ['Function', 'Method'] AND NOT EXISTS { MATCH ()-[:CALLS]->(s) } \
-             RETURN s.name AS name, s.kind AS kind, s.file AS file \
-             ORDER BY s.file, s.name",
-        ))?;
+        let q = if let Some(repo) = self.repo_filter() {
+            let r = escape(repo);
+            query(&format!(
+                "MATCH (f:File {{repo: '{r}'}})-[:DEFINES]->(s:Symbol) \
+                 WHERE s.kind IN ['Function', 'Method'] AND NOT EXISTS {{ MATCH ()-[:CALLS]->(s) }} \
+                 RETURN s.name AS name, s.kind AS kind, s.file AS file \
+                 ORDER BY s.file, s.name"
+            ))
+        } else {
+            query(
+                "MATCH (s:Symbol) \
+                 WHERE s.kind IN ['Function', 'Method'] AND NOT EXISTS { MATCH ()-[:CALLS]->(s) } \
+                 RETURN s.name AS name, s.kind AS kind, s.file AS file \
+                 ORDER BY s.file, s.name",
+            )
+        };
+        let rows = self.run_query(q)?;
         Ok(rows
             .iter()
             .map(|r| DeadCodeRow {
@@ -1020,6 +1149,82 @@ impl GraphBackend for Neo4jBackend {
     }
 
     fn get_architecture_stats(&self) -> Result<ArchitectureStats> {
+        if let Some(repo) = self.repo_filter() {
+            let r = escape(repo);
+            let lang_rows = self.run_query(query(&format!(
+                "MATCH (m:Module) WHERE EXISTS {{ MATCH (f:File {{repo: '{r}'}}) WHERE f.id = m.file }} \
+                 RETURN m.language AS lang, count(m) AS cnt ORDER BY cnt DESC"
+            )))?;
+            let languages: Vec<LanguageCount> = lang_rows
+                .iter()
+                .map(|r| LanguageCount {
+                    language: r.get("lang").unwrap_or_default(),
+                    count: r.get::<i64>("cnt").unwrap_or(0) as u64,
+                })
+                .collect();
+
+            let kind_rows = self.run_query(query(&format!(
+                "MATCH (f:File {{repo: '{r}'}})-[:DEFINES]->(s:Symbol) \
+                 RETURN s.kind AS kind, count(s) AS cnt ORDER BY cnt DESC"
+            )))?;
+            let kind_counts: Vec<KindCount> = kind_rows
+                .iter()
+                .map(|r| KindCount {
+                    kind: r.get("kind").unwrap_or_default(),
+                    count: r.get::<i64>("cnt").unwrap_or(0) as u64,
+                })
+                .collect();
+
+            let hotspot_rows = self.run_query(query(&format!(
+                "MATCH (f:File {{repo: '{r}'}})-[:DEFINES]->(s:Symbol) \
+                 RETURN s.file AS file, count(s) AS cnt ORDER BY cnt DESC LIMIT 10"
+            )))?;
+            let hotspot_files: Vec<FileHotspot> = hotspot_rows
+                .iter()
+                .map(|r| FileHotspot {
+                    file: r.get("file").unwrap_or_default(),
+                    count: r.get::<i64>("cnt").unwrap_or(0) as u64,
+                })
+                .collect();
+
+            let hub_rows = self.run_query(query(&format!(
+                "MATCH (f:File {{repo: '{r}'}})-[:DEFINES]->(s:Symbol)<-[c:CALLS]-() \
+                 RETURN s.name AS name, s.file AS file, count(c) AS calls \
+                 ORDER BY calls DESC LIMIT 10"
+            )))?;
+            let hub_functions: Vec<HubFunction> = hub_rows
+                .iter()
+                .map(|r| HubFunction {
+                    name: r.get("name").unwrap_or_default(),
+                    file: r.get("file").unwrap_or_default(),
+                    calls: r.get::<i64>("calls").unwrap_or(0) as u64,
+                })
+                .collect();
+
+            let entry_rows = self.run_query(query(&format!(
+                "MATCH (f:File {{repo: '{r}'}})-[:DEFINES]->(s:Symbol)-[:CALLS]->() \
+                 WHERE s.kind IN ['Function', 'Method'] AND NOT EXISTS {{ MATCH ()-[:CALLS]->(s) }} \
+                 RETURN DISTINCT s.name AS name, s.kind AS kind, s.file AS file \
+                 ORDER BY s.file, s.name LIMIT 20"
+            )))?;
+            let entry_points: Vec<DeadCodeRow> = entry_rows
+                .iter()
+                .map(|r| DeadCodeRow {
+                    name: r.get("name").unwrap_or_default(),
+                    kind: r.get("kind").unwrap_or_default(),
+                    file: r.get("file").unwrap_or_default(),
+                })
+                .collect();
+
+            return Ok(ArchitectureStats {
+                languages,
+                kind_counts,
+                hotspot_files,
+                hub_functions,
+                entry_points,
+            });
+        }
+
         let lang_rows = self.run_query(query(
             "MATCH (m:Module) RETURN m.language AS lang, count(m) AS cnt ORDER BY cnt DESC",
         ))?;
@@ -1095,17 +1300,36 @@ impl GraphBackend for Neo4jBackend {
         &self,
         kind_filter: Option<&[&str]>,
     ) -> Result<Vec<SymbolWithDocstring>> {
-        let cypher = if let Some(kinds) = kind_filter {
-            let k_list: Vec<String> = kinds.iter().map(|k| format!("'{}'", escape(k))).collect();
-            format!(
-                "MATCH (s:Symbol) WHERE s.kind IN [{}] \
-                 RETURN s.id AS id, s.name AS name, s.kind AS kind, s.file AS file, s.docstring AS docstring",
-                k_list.join(", ")
-            )
-        } else {
-            "MATCH (s:Symbol) \
-             RETURN s.id AS id, s.name AS name, s.kind AS kind, s.file AS file, s.docstring AS docstring"
-                .to_string()
+        let cypher = match (self.repo_filter(), kind_filter) {
+            (Some(repo), Some(kinds)) => {
+                let r = escape(repo);
+                let k_list: Vec<String> = kinds.iter().map(|k| format!("'{}'", escape(k))).collect();
+                format!(
+                    "MATCH (fi:File {{repo: '{r}'}})-[:DEFINES]->(s:Symbol) WHERE s.kind IN [{}] \
+                     RETURN s.id AS id, s.name AS name, s.kind AS kind, s.file AS file, s.docstring AS docstring",
+                    k_list.join(", ")
+                )
+            }
+            (Some(repo), None) => {
+                let r = escape(repo);
+                format!(
+                    "MATCH (fi:File {{repo: '{r}'}})-[:DEFINES]->(s:Symbol) \
+                     RETURN s.id AS id, s.name AS name, s.kind AS kind, s.file AS file, s.docstring AS docstring"
+                )
+            }
+            (None, Some(kinds)) => {
+                let k_list: Vec<String> = kinds.iter().map(|k| format!("'{}'", escape(k))).collect();
+                format!(
+                    "MATCH (s:Symbol) WHERE s.kind IN [{}] \
+                     RETURN s.id AS id, s.name AS name, s.kind AS kind, s.file AS file, s.docstring AS docstring",
+                    k_list.join(", ")
+                )
+            }
+            (None, None) => {
+                "MATCH (s:Symbol) \
+                 RETURN s.id AS id, s.name AS name, s.kind AS kind, s.file AS file, s.docstring AS docstring"
+                    .to_string()
+            }
         };
         let rows = self.run_query(query(&cypher))?;
         Ok(rows
@@ -1437,7 +1661,9 @@ impl GraphBackend for Neo4jBackend {
         self.block_on(
             self.graph.run(
                 query(
-                    "MATCH (f:File) WHERE f.repo IS NULL OR f.repo = '' \
+                    "MATCH (f:File) \
+                 WHERE (f.repo IS NULL OR f.repo = '') \
+                   AND NOT (f)-[:BELONGS_TO]->(:Repo) \
                  SET f.repo = $repo",
                 )
                 .param("repo", repo_name),

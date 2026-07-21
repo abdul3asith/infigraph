@@ -56,7 +56,16 @@ pub fn tool_index_project(args: &Value) -> Result<String> {
     }
 
     // Fallback: run inline if CLI not found
-    let prism = open_prism(args)?;
+    #[allow(unused_mut)]
+    let mut prism = open_prism(args)?;
+    #[cfg(feature = "remote")]
+    if is_remote_mode() {
+        let repo_name = std::path::Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.to_string());
+        prism.set_namespace(&repo_name);
+    }
     let result = prism.index()?;
 
     let mut out = if result.indexed_files == 0 {

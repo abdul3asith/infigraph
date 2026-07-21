@@ -42,8 +42,19 @@ pub(crate) fn cmd_index(root: &Path, full: bool, no_embed: bool) -> Result<()> {
     }
 
     let registry = crate::full_registry(Some(root))?;
+    #[allow(unused_mut)]
     let mut prism = Infigraph::open(root, registry)?;
     prism.init()?;
+
+    // In shared Neo4j mode, namespace-prefix all file/symbol IDs to prevent collisions
+    if remote {
+        let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        let repo_name = canonical
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        prism.set_namespace(&repo_name);
+    }
 
     println!("Indexing project...");
     let result = prism.index()?;

@@ -574,6 +574,12 @@ pub fn build_tools_list() -> Vec<Value> {
 
 pub fn mcp_log(level: &str, msg: &str) {
     use std::io::Write;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let line = format!("[{ts}] {level}: {msg}");
+    eprintln!("{line}");
     let path = mcp_log_file_path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -583,11 +589,7 @@ pub fn mcp_log(level: &str, msg: &str) {
         .append(true)
         .open(&path)
     {
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let _ = writeln!(f, "[{ts}] {level}: {msg}");
+        let _ = writeln!(f, "{line}");
     }
 }
 
