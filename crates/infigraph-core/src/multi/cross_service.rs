@@ -27,7 +27,10 @@ pub struct CrossServiceDep {
 pub fn detect_cross_service_deps(
     registry: &Registry,
     group_name: &str,
-    build_registry: impl Fn() -> Result<LanguageRegistry>,
+    // Kept for call-site compatibility (callers pass `bundled_registry`) even though
+    // this function no longer calls it — every loop below only queries the graph via
+    // `raw_query`, never parses source, so an empty `LanguageRegistry` is used instead.
+    _build_registry: impl Fn() -> Result<LanguageRegistry>,
 ) -> Result<Vec<CrossServiceDep>> {
     let group = registry
         .groups
@@ -137,8 +140,10 @@ pub fn detect_cross_service_deps(
             None => continue,
         };
 
-        let lang_registry = build_registry()?;
-        let mut prism = Infigraph::open(&entry.path, lang_registry)?;
+        // Only queries the graph below (raw_query) — never parses source, so no
+        // language packs are needed. Building the real registry here cost ~850ms/repo
+        // (compiling all 62 tree-sitter packs) for zero benefit.
+        let mut prism = Infigraph::open(&entry.path, LanguageRegistry::new())?;
         prism.init()?;
 
         let backend = match prism.backend() {
@@ -280,11 +285,12 @@ pub fn detect_cross_service_deps(
             };
             let spec_hits = scan_source_for_spec_fetches(&entry.path);
             for (file, symbol_hint, spec_path) in spec_hits {
-                // Resolve symbol from line hint
-                let lang_registry = build_registry()?;
+                // Resolve symbol from line hint. Only queries the graph below — no
+                // parsing needed, so an empty registry avoids rebuilding all 62
+                // language packs per spec-fetch match.
                 let caller_id = if let Some(stripped) = symbol_hint.strip_prefix("line:") {
                     let line_num: i32 = stripped.parse().unwrap_or(0);
-                    if let Ok(mut prism) = Infigraph::open(&entry.path, lang_registry) {
+                    if let Ok(mut prism) = Infigraph::open(&entry.path, LanguageRegistry::new()) {
                         if prism.init().is_ok() {
                             if let Some(backend) = prism.backend() {
                                 let escaped_file = file.replace('\'', "\\'");
@@ -340,8 +346,8 @@ pub fn detect_cross_service_deps(
     if !pkg_name_to_service.is_empty() {
         for repo_name in &group.repos {
             if let Some(entry) = registry.repos.get(repo_name) {
-                let lang_reg = build_registry()?;
-                if let Ok(mut prism) = Infigraph::open(&entry.path, lang_reg) {
+                // Only queries the graph below — empty registry, no parsing needed.
+                if let Ok(mut prism) = Infigraph::open(&entry.path, LanguageRegistry::new()) {
                     if prism.init().is_ok() {
                         if let Some(backend) = prism.backend() {
                             if let Ok(member_deps) = crate::manifest::query_deps(backend) {
@@ -522,8 +528,8 @@ pub fn link_cross_service_calls(
             None => continue,
         };
 
-        let lang_registry = build_registry()?;
-        let mut prism = Infigraph::open(&entry.path, lang_registry)?;
+        // Only queries the graph below — empty registry, no parsing needed.
+        let mut prism = Infigraph::open(&entry.path, LanguageRegistry::new())?;
         prism.init()?;
 
         let backend = match prism.backend() {
@@ -613,8 +619,8 @@ pub fn link_cross_service_calls(
                 Some(e) => e,
                 None => continue,
             };
-            let lang_registry = build_registry()?;
-            let mut prism = Infigraph::open(&entry.path, lang_registry)?;
+            // Only queries the graph below — empty registry, no parsing needed.
+            let mut prism = Infigraph::open(&entry.path, LanguageRegistry::new())?;
             prism.init()?;
             let backend = match prism.backend() {
                 Some(b) => b,
@@ -1546,7 +1552,9 @@ fn extract_mcp_topic_from_url(url: &str) -> Option<String> {
 pub fn detect_shared_package_deps(
     registry: &Registry,
     group_name: &str,
-    build_registry: &impl Fn() -> Result<LanguageRegistry>,
+    // Kept for call-site compatibility — this function only queries the graph via
+    // `raw_query`, never parses source, so an empty `LanguageRegistry` is used instead.
+    _build_registry: &impl Fn() -> Result<LanguageRegistry>,
 ) -> Result<Vec<Contract>> {
     let group = registry
         .groups
@@ -1575,8 +1583,8 @@ pub fn detect_shared_package_deps(
             None => continue,
         };
 
-        let lang_registry = build_registry()?;
-        let mut prism = Infigraph::open(&entry.path, lang_registry)?;
+        // Only queries the graph below — empty registry, no parsing needed.
+        let mut prism = Infigraph::open(&entry.path, LanguageRegistry::new())?;
         prism.init()?;
 
         let backend = match prism.backend() {

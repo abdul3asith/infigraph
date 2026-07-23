@@ -244,7 +244,9 @@ impl Registry {
         &self,
         group_name: &str,
         cypher: &str,
-        build_registry: impl Fn() -> Result<LanguageRegistry>,
+        // Kept for call-site compatibility — only runs raw_query below, never
+        // parses source, so an empty LanguageRegistry is used instead.
+        _build_registry: impl Fn() -> Result<LanguageRegistry>,
     ) -> Result<Vec<(String, Vec<Vec<String>>)>> {
         let group = self
             .groups
@@ -258,8 +260,10 @@ impl Registry {
                 .get(repo_name)
                 .context(format!("repo '{}' not in registry", repo_name))?;
 
-            let registry = build_registry()?;
-            let mut prism = Infigraph::open(&entry.path, registry)?;
+            // Runs arbitrary user-supplied Cypher via raw_query below — never parses
+            // source, so an empty registry avoids rebuilding all 62 language packs
+            // per repo in the group.
+            let mut prism = Infigraph::open(&entry.path, LanguageRegistry::new())?;
             prism.init()?;
 
             let backend = prism.backend().context("graph not initialized")?;
@@ -465,7 +469,10 @@ fn parse_route_from_docstring(doc: &str) -> (String, String) {
 pub fn sync_group_contracts(
     registry: &mut Registry,
     group_name: &str,
-    build_registry: impl Fn() -> Result<LanguageRegistry>,
+    // Kept for call-site compatibility — extract_contracts and the dependency
+    // scan below only run raw_query, never parse source, so an empty
+    // LanguageRegistry is used instead.
+    _build_registry: impl Fn() -> Result<LanguageRegistry>,
 ) -> Result<usize> {
     let group = registry
         .groups
@@ -497,8 +504,10 @@ pub fn sync_group_contracts(
             .context(format!("repo '{}' not in registry", repo_name))?
             .clone();
 
-        let lang_registry = build_registry()?;
-        let mut prism = Infigraph::open(&entry.path, lang_registry)?;
+        // extract_contracts (below) and the dependency scan after it only run
+        // raw_query against the already-built graph — never parse source — so an
+        // empty registry avoids rebuilding all 62 language packs per repo.
+        let mut prism = Infigraph::open(&entry.path, LanguageRegistry::new())?;
         prism.init()?;
 
         let contracts = extract_contracts(&prism, repo_name)?;
