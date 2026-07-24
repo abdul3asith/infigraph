@@ -407,8 +407,24 @@ pub(crate) fn is_ci() -> bool {
     CI_ENV_VARS.iter().any(|v| std::env::var_os(v).is_some())
 }
 
+fn is_remote_backend() -> bool {
+    #[cfg(feature = "remote")]
+    {
+        std::env::var("INFIGRAPH_BACKEND")
+            .map(|v| v == "neo4j")
+            .unwrap_or(false)
+    }
+    #[cfg(not(feature = "remote"))]
+    {
+        false
+    }
+}
+
 pub(crate) fn ensure_watcher_running(root: &Path) {
-    if is_ci() {
+    // Remote (shared-Neo4j) mode reindexes via webhook, not local file
+    // watching — spawning a watcher here would race the webhook path and
+    // serve no purpose (see docs/WEBHOOK-REINDEX.md).
+    if is_ci() || is_remote_backend() {
         return;
     }
 
@@ -1407,6 +1423,22 @@ mod tests {
         assert!(!tg_dir.join("watch.lock").exists());
 
         std::env::remove_var("CI");
+    }
+
+    #[test]
+    #[cfg(feature = "remote")]
+    fn ensure_watcher_noop_when_remote_backend() {
+        // Remote (shared-Neo4j) mode reindexes via webhook — a local watcher
+        // would be redundant and race the webhook path.
+        std::env::set_var("INFIGRAPH_BACKEND", "neo4j");
+        let tmp = TempDir::new().unwrap();
+        let tg_dir = tmp.path().join(".infigraph");
+        fs::create_dir_all(&tg_dir).unwrap();
+
+        ensure_watcher_running(tmp.path());
+        assert!(!tg_dir.join("watch.lock").exists());
+
+        std::env::remove_var("INFIGRAPH_BACKEND");
     }
 
     #[test]
