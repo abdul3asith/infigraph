@@ -685,10 +685,14 @@ pub fn index_group(
         .unwrap_or(false);
 
     let org = group.org.clone();
+    // Build once and share across repos — bundled_registry() compiles ~62
+    // tree-sitter packs from scratch on every call, and LanguageRegistry
+    // can't be cheaply cloned (tree_sitter::Query isn't Clone), so a fresh
+    // build per repo is pure wasted time on `--full`/large-group runs.
+    let shared_registry = std::sync::Arc::new(build_registry()?);
     let index_one =
         |repo_name: &str, entry: &RepoEntry| -> Result<(String, usize, usize, Infigraph)> {
-            let lang_registry = build_registry()?;
-            let mut prism = Infigraph::open(&entry.path, lang_registry)?;
+            let mut prism = Infigraph::open_shared(&entry.path, shared_registry.clone())?;
             prism.init()?;
             if prism.backend().is_some() {
                 let ns = if org.is_empty() {
