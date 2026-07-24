@@ -19,6 +19,7 @@ const JAVASCRIPT_RELATIONS: &str = include_str!("../languages/javascript/relatio
 
 const GO_ENTITIES: &str = include_str!("../languages/go/entities.scm");
 const GO_RELATIONS: &str = include_str!("../languages/go/relations.scm");
+const GO_INHERIT_DECOMPOSE: &str = include_str!("../languages/go/inherit_decompose.scm");
 
 const JAVA_ENTITIES: &str = include_str!("../languages/java/entities.scm");
 const JAVA_RELATIONS: &str = include_str!("../languages/java/relations.scm");
@@ -38,9 +39,11 @@ const PHP_RELATIONS: &str = include_str!("../languages/php/relations.scm");
 
 const SWIFT_ENTITIES: &str = include_str!("../languages/swift/entities.scm");
 const SWIFT_RELATIONS: &str = include_str!("../languages/swift/relations.scm");
+const SWIFT_INHERIT_DECOMPOSE: &str = include_str!("../languages/swift/inherit_decompose.scm");
 
 const KOTLIN_ENTITIES: &str = include_str!("../languages/kotlin/entities.scm");
 const KOTLIN_RELATIONS: &str = include_str!("../languages/kotlin/relations.scm");
+const KOTLIN_INHERIT_DECOMPOSE: &str = include_str!("../languages/kotlin/inherit_decompose.scm");
 
 const CSHARP_ENTITIES: &str = include_str!("../languages/csharp/entities.scm");
 const CSHARP_RELATIONS: &str = include_str!("../languages/csharp/relations.scm");
@@ -486,7 +489,8 @@ fn go_pack() -> Result<LanguagePack> {
             name: "SPAWNS".to_string(),
             capture: "goroutine".to_string(),
         }],
-    )
+    )?
+    .with_inherit_decompose(GO_INHERIT_DECOMPOSE)
 }
 
 fn java_pack() -> Result<LanguagePack> {
@@ -541,7 +545,8 @@ fn swift_pack() -> Result<LanguagePack> {
         grammar,
         SWIFT_ENTITIES,
         SWIFT_RELATIONS,
-    )
+    )?
+    .with_inherit_decompose(SWIFT_INHERIT_DECOMPOSE)
 }
 
 fn kotlin_pack() -> Result<LanguagePack> {
@@ -552,7 +557,8 @@ fn kotlin_pack() -> Result<LanguagePack> {
         grammar,
         KOTLIN_ENTITIES,
         KOTLIN_RELATIONS,
-    )
+    )?
+    .with_inherit_decompose(KOTLIN_INHERIT_DECOMPOSE)
 }
 
 fn csharp_pack() -> Result<LanguagePack> {

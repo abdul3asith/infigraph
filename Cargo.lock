@@ -2440,6 +2440,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
+ "toml",
  "ureq 2.12.1",
 ]
 
@@ -2607,6 +2608,7 @@ name = "infigraph-mcp"
 version = "3.2.5"
 dependencies = [
  "anyhow",
+ "dirs-next",
  "fs2",
  "hex",
  "hmac 0.12.1",

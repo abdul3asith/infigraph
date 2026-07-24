@@ -420,3 +420,299 @@ fn test_extraction_java_inheritance_compound_bases_resolve_correctly() {
         extraction.relations
     );
 }
+
+/// Regression test: Dart extends/implements clauses whose base type is generic
+/// (`Animal<T>`) or qualified (`pkg.Animal`) previously resolved to the wrong
+/// identifier under the narrow `(type_identifier)`-only pattern. Confirms both
+/// resolve correctly via the single fully-anchored pattern (no decomposition
+/// query needed for Dart), and that multiple `implements` interfaces each
+/// produce their own correct edge.
+#[test]
+fn test_extraction_dart_inheritance_compound_bases_resolve_correctly() {
+    use infigraph_core::model::RelationKind;
+
+    let registry = bundled_registry().unwrap();
+    let pack = registry.for_extension(".dart").unwrap();
+
+    let source = b"class Animal<T> {}\nclass Dog extends Animal<int> {}\n\nclass Walker {}\nclass Runner {}\nclass Athlete implements Walker, Runner {}\n";
+    let extraction = infigraph_core::extract::extract_file("test.dart", source, pack)
+        .expect("extraction should succeed");
+
+    let has_edge = |child: &str, parent: &str| {
+        extraction.relations.iter().any(|r| {
+            r.kind == RelationKind::Inherits
+                && r.source_id.contains(child)
+                && r.target_id.ends_with(&format!("::{parent}"))
+        })
+    };
+
+    assert!(
+        has_edge("Dog", "Animal"),
+        "generic extends should resolve to \"Animal\", not \"Animal<int>\": {:?}",
+        extraction.relations
+    );
+    assert!(
+        has_edge("Athlete", "Walker") && has_edge("Athlete", "Runner"),
+        "multiple implements interfaces should each produce their own edge: {:?}",
+        extraction.relations
+    );
+}
+
+/// Regression test: dart/relations.scm had no inheritance capture at all.
+#[test]
+fn test_extraction_dart_inheritance_produces_edges() {
+    use infigraph_core::model::RelationKind;
+
+    let registry = bundled_registry().unwrap();
+    let pack = registry.for_extension(".dart").unwrap();
+
+    let source = b"class Animal {}\nclass Dog extends Animal {}\n\nclass Drawable {}\nclass Square implements Drawable {}\n";
+    let extraction = infigraph_core::extract::extract_file("test.dart", source, pack)
+        .expect("extraction should succeed");
+
+    let has_edge = |child: &str, parent: &str| {
+        extraction.relations.iter().any(|r| {
+            r.kind == RelationKind::Inherits
+                && r.source_id.contains(child)
+                && r.target_id.contains(parent)
+        })
+    };
+
+    assert!(
+        has_edge("Dog", "Animal"),
+        "class extends: {:?}",
+        extraction.relations
+    );
+    assert!(
+        has_edge("Square", "Drawable"),
+        "class implements: {:?}",
+        extraction.relations
+    );
+}
+
+/// Regression test: Go embedded fields that are generic (`Base[T]`) or
+/// package-qualified (`pkg.Animal`) previously resolved to the wrong identifier
+/// once the query was wildcard-ified without a decomposition step. Confirms
+/// both resolve to their real base type name, and that a named (non-embedded)
+/// field is correctly excluded (not treated as inheritance).
+#[test]
+fn test_extraction_go_struct_embedding_compound_bases_resolve_correctly() {
+    use infigraph_core::model::RelationKind;
+
+    let registry = bundled_registry().unwrap();
+    let pack = registry.for_extension(".go").unwrap();
+
+    let source = b"package main\n\ntype Base[T any] struct {\n\tValue T\n}\ntype Container struct {\n\tBase[int]\n}\n\ntype Animal struct{}\ntype Dog struct {\n\tAnimal\n\tName string\n}\n";
+    let extraction = infigraph_core::extract::extract_file("test.go", source, pack)
+        .expect("extraction should succeed");
+
+    let has_edge = |child: &str, parent: &str| {
+        extraction.relations.iter().any(|r| {
+            r.kind == RelationKind::Inherits
+                && r.source_id.contains(child)
+                && r.target_id.ends_with(&format!("::{parent}"))
+        })
+    };
+
+    assert!(
+        has_edge("Container", "Base"),
+        "generic embedded field should resolve to \"Base\", not \"Base[int]\": {:?}",
+        extraction.relations
+    );
+    assert!(
+        !extraction
+            .relations
+            .iter()
+            .any(|r| r.kind == RelationKind::Inherits
+                && r.source_id.contains("Dog")
+                && r.target_id.contains("Name")),
+        "named field \"Name\" must NOT produce a spurious INHERITS edge: {:?}",
+        extraction.relations
+    );
+}
+
+/// Regression test: Go has no `extends`/`implements` keywords, but struct
+/// embedding (an anonymous field with no name, just a type) is its closest
+/// analog to inheritance and wasn't captured at all. Interface satisfaction
+/// in Go is implicit/structural and can't be determined from syntax alone,
+/// so it's intentionally not covered here.
+#[test]
+fn test_extraction_go_struct_embedding_produces_inherits_edge() {
+    use infigraph_core::model::RelationKind;
+
+    let registry = bundled_registry().unwrap();
+    let pack = registry.for_extension(".go").unwrap();
+
+    let source = b"package main\ntype Animal struct {\n\tName string\n}\ntype Dog struct {\n\tAnimal\n\tBreed string\n}\n";
+    let extraction = infigraph_core::extract::extract_file("test.go", source, pack)
+        .expect("extraction should succeed");
+
+    assert!(
+        extraction
+            .relations
+            .iter()
+            .any(|r| r.kind == RelationKind::Inherits
+                && r.source_id.contains("Dog")
+                && r.target_id.contains("Animal")),
+        "expected an INHERITS edge from Dog to Animal (embedded field), got: {:?}",
+        extraction.relations
+    );
+}
+
+/// Regression test: Kotlin superclasses/interfaces that are generic
+/// (`Comparable<Dog>`) or qualified (`pkg.Animal`) previously resolved to the
+/// wrong identifier once wildcard-ified without a decomposition step (Kotlin's
+/// grammar declares no fields on `user_type` at all, so this needed a
+/// kind+anchor-based query rather than field-based).
+#[test]
+fn test_extraction_kotlin_inheritance_compound_bases_resolve_correctly() {
+    use infigraph_core::model::RelationKind;
+
+    let registry = bundled_registry().unwrap();
+    let pack = registry.for_extension(".kt").unwrap();
+
+    let source = b"class Dog : Comparable<Dog> {}\n";
+    let extraction = infigraph_core::extract::extract_file("Test.kt", source, pack)
+        .expect("extraction should succeed");
+
+    assert!(
+        extraction
+            .relations
+            .iter()
+            .any(|r| r.kind == RelationKind::Inherits
+                && r.source_id.contains("Dog")
+                && r.target_id.ends_with("::Comparable")),
+        "generic superclass should resolve to \"Comparable\", not \"Comparable<Dog>\": {:?}",
+        extraction.relations
+    );
+}
+
+/// Regression test: kotlin/relations.scm had no inheritance capture at all.
+#[test]
+fn test_extraction_kotlin_inheritance_produces_edges() {
+    use infigraph_core::model::RelationKind;
+
+    let registry = bundled_registry().unwrap();
+    let pack = registry.for_extension(".kt").unwrap();
+
+    let source =
+        b"open class Animal\nclass Dog : Animal()\n\ninterface Shape\nclass Circle : Shape\n";
+    let extraction = infigraph_core::extract::extract_file("Test.kt", source, pack)
+        .expect("extraction should succeed");
+
+    let has_edge = |child: &str, parent: &str| {
+        extraction.relations.iter().any(|r| {
+            r.kind == RelationKind::Inherits
+                && r.source_id.contains(child)
+                && r.target_id.contains(parent)
+        })
+    };
+
+    assert!(
+        has_edge("Dog", "Animal"),
+        "class inheritance: {:?}",
+        extraction.relations
+    );
+    assert!(
+        has_edge("Circle", "Shape"),
+        "interface implementation: {:?}",
+        extraction.relations
+    );
+}
+
+/// Regression test: objc/relations.scm had no inheritance capture, AND
+/// objc/entities.scm's class_interface/class_implementation/
+/// protocol_declaration patterns used a `name:` field that doesn't exist on
+/// those grammar nodes (verified against tree-sitter-objc's node-types.json
+/// -- the class name is an unlabeled positional child, not a field), so
+/// every Objective-C class/protocol produced zero symbols at all, not just
+/// zero inheritance edges.
+#[test]
+fn test_extraction_objc_produces_symbols_and_inherits_edge() {
+    use infigraph_core::model::RelationKind;
+
+    let registry = bundled_registry().unwrap();
+    let pack = registry.for_extension(".m").unwrap();
+
+    let source = b"@interface Animal\n@end\n@interface Dog : Animal\n@end\n";
+    let extraction = infigraph_core::extract::extract_file("Test.m", source, pack)
+        .expect("extraction should succeed");
+
+    let names: Vec<&str> = extraction.symbols.iter().map(|s| s.name.as_str()).collect();
+    assert!(
+        names.contains(&"Animal"),
+        "should extract Animal: {names:?}"
+    );
+    assert!(names.contains(&"Dog"), "should extract Dog: {names:?}");
+
+    assert!(
+        extraction
+            .relations
+            .iter()
+            .any(|r| r.kind == RelationKind::Inherits
+                && r.source_id.contains("Dog")
+                && r.target_id.contains("Animal")),
+        "expected an INHERITS edge from Dog to Animal, got: {:?}",
+        extraction.relations
+    );
+}
+
+/// Regression test: Swift superclasses/protocol conformances that are generic
+/// (`Comparable<Dog>`) previously resolved to the wrong identifier once
+/// wildcard-ified without a decomposition step (Swift's `user_type` is
+/// structurally identical to Kotlin's -- no fields, kind+anchor-based).
+#[test]
+fn test_extraction_swift_inheritance_compound_bases_resolve_correctly() {
+    use infigraph_core::model::RelationKind;
+
+    let registry = bundled_registry().unwrap();
+    let pack = registry.for_extension(".swift").unwrap();
+
+    let source = b"class Dog: Comparable<Dog> {}\n";
+    let extraction = infigraph_core::extract::extract_file("Test.swift", source, pack)
+        .expect("extraction should succeed");
+
+    assert!(
+        extraction
+            .relations
+            .iter()
+            .any(|r| r.kind == RelationKind::Inherits
+                && r.source_id.contains("Dog")
+                && r.target_id.ends_with("::Comparable")),
+        "generic superclass should resolve to \"Comparable\", not \"Comparable<Dog>\": {:?}",
+        extraction.relations
+    );
+}
+
+/// Regression test: swift/relations.scm had no inheritance capture at all.
+#[test]
+fn test_extraction_swift_inheritance_produces_edges() {
+    use infigraph_core::model::RelationKind;
+
+    let registry = bundled_registry().unwrap();
+    let pack = registry.for_extension(".swift").unwrap();
+
+    let source =
+        b"class Animal {}\nclass Dog: Animal {}\n\nprotocol Shape {}\nprotocol Circle: Shape {}\n";
+    let extraction = infigraph_core::extract::extract_file("Test.swift", source, pack)
+        .expect("extraction should succeed");
+
+    let has_edge = |child: &str, parent: &str| {
+        extraction.relations.iter().any(|r| {
+            r.kind == RelationKind::Inherits
+                && r.source_id.contains(child)
+                && r.target_id.contains(parent)
+        })
+    };
+
+    assert!(
+        has_edge("Dog", "Animal"),
+        "class inheritance: {:?}",
+        extraction.relations
+    );
+    assert!(
+        has_edge("Circle", "Shape"),
+        "protocol inheritance: {:?}",
+        extraction.relations
+    );
+}
