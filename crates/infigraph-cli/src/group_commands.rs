@@ -366,6 +366,12 @@ pub(crate) fn cmd_group(root: &Path, action: GroupAction) -> Result<()> {
                 let mut idx = infigraph_docs::DocIndex::open(&entry.path)?;
                 if is_remote {
                     idx.set_skip_file_embeddings(true);
+                    let ns = if g.org.is_empty() {
+                        repo_name.clone()
+                    } else {
+                        format!("{}/{}", g.org, repo_name)
+                    };
+                    idx.set_namespace(&ns);
                 }
                 idx.init()?;
                 let result = idx.index()?;
