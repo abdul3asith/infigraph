@@ -2470,6 +2470,7 @@ dependencies = [
  "fs2",
  "glob",
  "ignore",
+ "infigraph-languages",
  "lbug",
  "memmap2",
  "model2vec-rs",
