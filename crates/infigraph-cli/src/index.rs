@@ -264,7 +264,11 @@ pub(crate) fn cmd_index(root: &Path, full: bool, no_embed: bool) -> Result<()> {
     }
 
     // Auto-index documents (PDF, DOCX, XML, Markdown, etc.)
-    match crate::commands::cmd_index_docs(root) {
+    #[cfg(feature = "remote")]
+    let doc_ns = remote_ns.as_deref();
+    #[cfg(not(feature = "remote"))]
+    let doc_ns: Option<&str> = None;
+    match crate::commands::cmd_index_docs(root, doc_ns) {
         Ok(()) => {}
         Err(e) => eprintln!("warning: document indexing failed: {e}"),
     }
