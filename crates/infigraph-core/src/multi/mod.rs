@@ -716,7 +716,11 @@ pub fn index_group(
         |repo_name: &str, entry: &RepoEntry| -> Result<(String, usize, usize, Infigraph)> {
             let mut prism = Infigraph::open_shared(&entry.path, shared_registry.clone())?;
             prism.init()?;
-            if prism.backend().is_some() {
+            // Only namespace in remote/shared-graph mode. In local mode each repo has its
+            // own embedded DB, so prefixing file keys with the repo name just changes them
+            // between a standalone `index` and a `group index` run — the stale-file prune
+            // in index_via_backend then sees the old unprefixed key as gone and deletes it.
+            if use_parallel && prism.backend().is_some() {
                 let ns = if org.is_empty() {
                     repo_name.to_string()
                 } else {
