@@ -213,8 +213,6 @@ impl Infigraph {
 
         let ns = &self.namespace;
         let done = std::sync::atomic::AtomicUsize::new(0);
-        let skipped_files: std::sync::Mutex<Vec<(String, String)>> =
-            std::sync::Mutex::new(Vec::new());
         let extractions: Vec<FileExtraction> = files
             .par_iter()
             .filter_map(|path| {
@@ -243,40 +241,11 @@ impl Infigraph {
                     return None;
                 }
                 let pack = self.registry.for_file_with_content(&rel_path, &source)?;
-                match extract::extract_file(&rel_path, &source, pack) {
-                    Ok(extraction) => Some(extraction),
-                    Err(e) => {
-                        eprintln!("warning: skipping {rel_path}: {e}");
-                        skipped_files
-                            .lock()
-                            .unwrap()
-                            .push((rel_path.clone(), e.to_string()));
-                        None
-                    }
-                }
+                extract::extract_file(&rel_path, &source, pack).ok()
             })
             .collect();
 
         let indexed = extractions.len();
-
-        let skipped_files = skipped_files.into_inner().unwrap();
-        if !skipped_files.is_empty() {
-            eprintln!(
-                "\n{} file(s) skipped during parsing (not indexed — will retry on next `infigraph index`):",
-                skipped_files.len()
-            );
-            for (path, reason) in &skipped_files {
-                eprintln!("  {path}: {reason}");
-            }
-            eprintln!(
-                "To silence permanently, add to .infigraphignore:\n{}",
-                skipped_files
-                    .iter()
-                    .map(|(path, _)| format!("  {path}"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            );
-        }
 
         if !extractions.is_empty() {
             eprintln!("Writing: {} files (backend bulk)", indexed);

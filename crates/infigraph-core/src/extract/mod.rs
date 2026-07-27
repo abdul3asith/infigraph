@@ -14,32 +14,8 @@ thread_local! {
     static TS_PARSER: std::cell::RefCell<tree_sitter::Parser> = std::cell::RefCell::new(tree_sitter::Parser::new());
 }
 
-/// Files larger than this are skipped before parsing rather than handed to
-/// tree-sitter. A small minority of files (huge single-statement SQL dumps,
-/// bulk data fixtures) can trigger catastrophic GLR backtracking that turns a
-/// normal few-second parse into tens of minutes — and a progress-callback
-/// based cancellation was tried and found unreliable: tree-sitter's error
-/// recovery path does not consistently return to the checkpoint where the
-/// callback fires, so cancellation could silently fail to trigger. A
-/// deterministic pre-parse size cap avoids that. In practice, no real
-/// hand-written source file approaches this size — files this large are
-/// generated data dumps that yield negligible code-intelligence value, so
-/// nothing meaningful is lost by skipping them outright.
-const MAX_PARSE_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
-
 /// Parse a source file and extract all symbols and relationships.
 pub fn extract_file(path: &str, source: &[u8], pack: &LanguagePack) -> Result<FileExtraction> {
-    if source.len() > MAX_PARSE_BYTES {
-        anyhow::bail!(
-            "file too large to parse safely ({} bytes, cap is {} bytes) for {} — \
-             likely a generated data dump, not hand-written source; \
-             consider excluding it via .infigraphignore",
-            source.len(),
-            MAX_PARSE_BYTES,
-            path
-        );
-    }
-
     let (symbols, mut relations, statements) = match &pack.backend {
         ParserBackend::TreeSitter {
             grammar,
