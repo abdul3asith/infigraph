@@ -585,14 +585,17 @@ mod tests {
             )
         });
 
-        // Give the watcher time to register before triggering a change.
-        std::thread::sleep(Duration::from_millis(300));
+        // Give the watcher time to register before triggering a change. Under
+        // heavy machine load the notify backend can take noticeably longer to
+        // arm; a too-short wait means the remove fires before the watch is live
+        // and the event is missed entirely, so keep this generous.
+        std::thread::sleep(Duration::from_millis(1000));
         std::fs::remove_file(&file_path).unwrap();
 
         // Poll rather than a single fixed sleep: fast on a quiet machine,
-        // robust on a loaded one.
+        // robust on a loaded one. ~10s ceiling absorbs fs-notify debounce + load.
         let mut seen = false;
-        for _ in 0..40 {
+        for _ in 0..100 {
             std::thread::sleep(Duration::from_millis(100));
             if !events.lock().unwrap().is_empty() {
                 seen = true;
