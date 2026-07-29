@@ -41,6 +41,17 @@ pub(crate) fn language_from_file(file: &str) -> Lang {
     }
 }
 
+/// True if `kw` occurs in `text` bounded by non-alphanumeric chars (or
+/// start/end of string) on both sides, so e.g. "get" matches "@router.get("
+/// and "GET /x" but not the "get" inside "/widgets" or "budget()".
+fn contains_word(text: &str, kw: &str) -> bool {
+    let is_boundary = |c: Option<char>| !matches!(c, Some(c) if c.is_alphanumeric());
+    text.match_indices(kw).any(|(start, _)| {
+        let end = start + kw.len();
+        is_boundary(text[..start].chars().next_back()) && is_boundary(text[end..].chars().next())
+    })
+}
+
 pub(crate) fn detect_from_docstring(
     id: &str,
     name: &str,
@@ -49,11 +60,11 @@ pub(crate) fn detect_from_docstring(
 ) -> Option<Route> {
     // Look for explicit HTTP method keywords in docstrings
     let http_methods = [
-        ("get ", "GET"),
-        ("post ", "POST"),
-        ("put ", "PUT"),
-        ("delete ", "DELETE"),
-        ("patch ", "PATCH"),
+        ("get", "GET"),
+        ("post", "POST"),
+        ("put", "PUT"),
+        ("delete", "DELETE"),
+        ("patch", "PATCH"),
     ];
 
     // Pattern: docstring mentions route/endpoint/api along with an HTTP method
@@ -70,10 +81,12 @@ pub(crate) fn detect_from_docstring(
         return None;
     }
 
-    // Try to extract method from docstring
+    // Try to extract method from docstring. Match as a whole word (not a
+    // substring of a path segment like "widgets" or "deleted") by requiring
+    // a non-alphanumeric char (or start-of-string) on both sides.
     let method = http_methods
         .iter()
-        .find(|(kw, _)| doc_lower.contains(kw))
+        .find(|(kw, _)| contains_word(doc_lower, kw))
         .map(|(_, m)| m.to_string())
         .unwrap_or_else(|| "GET".to_string());
 

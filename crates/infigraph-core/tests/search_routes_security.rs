@@ -1,6 +1,6 @@
 use infigraph_core::bridges::BridgeScanResult;
 use infigraph_core::model::{Bridge, BridgeKind};
-use infigraph_core::routes::{format_routes, Route};
+use infigraph_core::routes::{detect_routes_from_rows, format_routes, Route};
 use infigraph_core::security::{
     format_scan_results, scan_project, Category, Finding, ScanStats, Severity,
 };
@@ -340,4 +340,73 @@ fn test_sanitizer_window_respects_boundary() {
         !sql_findings.is_empty(),
         "sanitizer 10+ lines away should NOT suppress finding"
     );
+}
+
+// ==================== detect_routes_from_rows: HTTP method from decorator ====================
+//
+// Regression tests for AIF3X-331: `detect_routes` mislabeled FastAPI
+// `@router.post(...)` / `@router.get(...)` decorators. The decorator text is
+// captured into the symbol's docstring column (col 4) at extraction time, and
+// `detect_from_docstring` parses the method+path from it. The bug: the method
+// keyword was matched with a trailing space ("post ") which never matches the
+// real `.post(` syntax, so everything silently defaulted to GET.
+
+/// Build a synthetic symbol row in the layout `detect_routes_from_rows` reads:
+/// `[id, name, kind, file, docstring]`. The decorator lands in the docstring
+/// column exactly as the tree-sitter extractor stores it.
+fn route_row(name: &str, decorator: &str) -> Vec<String> {
+    vec![
+        format!("f.py::{name}"),
+        name.to_string(),
+        "Function".to_string(),
+        "f.py".to_string(),
+        decorator.to_string(),
+    ]
+}
+
+#[test]
+fn test_detect_routes_post_decorator_is_post_not_get() {
+    let rows = vec![route_row(
+        "generate_chat_response",
+        r#"@router.post("/{model_id}/chat/completions")"#,
+    )];
+    let routes = detect_routes_from_rows(&rows);
+    assert_eq!(routes.len(), 1, "expected one route, got: {routes:?}");
+    assert_eq!(routes[0].method, "POST", "@router.post must be POST");
+    assert_eq!(routes[0].path, "/{model_id}/chat/completions");
+}
+
+#[test]
+fn test_detect_routes_get_decorator_is_get() {
+    let rows = vec![route_row(
+        "get_status",
+        r#"@router.get("/{model_id}/status")"#,
+    )];
+    let routes = detect_routes_from_rows(&rows);
+    assert_eq!(routes.len(), 1, "expected one route, got: {routes:?}");
+    assert_eq!(routes[0].method, "GET");
+}
+
+#[test]
+fn test_detect_routes_method_name_in_path_is_not_the_method() {
+    // "/widgets" contains "get" as a substring: must stay POST, not become GET.
+    let rows = vec![route_row("create_widget", r#"@router.post("/widgets")"#)];
+    let routes = detect_routes_from_rows(&rows);
+    assert_eq!(routes.len(), 1, "expected one route, got: {routes:?}");
+    assert_eq!(
+        routes[0].method, "POST",
+        "'get' inside '/widgets' must not flip method to GET"
+    );
+}
+
+#[test]
+fn test_detect_routes_method_name_embedded_in_words_is_ignored() {
+    // "budget" contains "get", "deleted" contains "delete": neither is the verb.
+    let rows = vec![route_row(
+        "mark_deleted",
+        r#"@router.post("/budget/deleted")"#,
+    )];
+    let routes = detect_routes_from_rows(&rows);
+    assert_eq!(routes.len(), 1, "expected one route, got: {routes:?}");
+    assert_eq!(routes[0].method, "POST");
 }
