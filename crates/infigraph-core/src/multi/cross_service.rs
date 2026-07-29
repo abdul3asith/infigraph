@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::lang::LanguageRegistry;
 use crate::Infigraph;
 
-use super::{Contract, ContractKind, Registry};
+use super::{ContractKind, Registry};
 
 /// A cross-service dependency: service A calls service B at a specific route.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1579,78 +1579,6 @@ fn extract_mcp_topic_from_url(url: &str) -> Option<String> {
 
 /// Detect cross-repo package dependencies within a group.
 /// If repo B depends on a package that repo A publishes, returns a Contract linking them.
-pub fn detect_shared_package_deps(
-    registry: &Registry,
-    group_name: &str,
-    // Kept for call-site compatibility — this function only queries the graph via
-    // `raw_query`, never parses source, so an empty `LanguageRegistry` is used instead.
-    _build_registry: &impl Fn() -> Result<LanguageRegistry>,
-) -> Result<Vec<Contract>> {
-    let group = registry
-        .groups
-        .get(group_name)
-        .context(format!("group '{}' not found", group_name))?;
-
-    // Build map: published_package_name → repo_name
-    let mut publishers: HashMap<String, String> = HashMap::new();
-    for repo_name in &group.repos {
-        let entry = match registry.repos.get(repo_name) {
-            Some(e) => e,
-            None => continue,
-        };
-        if let Some(pkg_name) = read_published_package_name(&entry.path) {
-            publishers.insert(pkg_name, repo_name.clone());
-        }
-    }
-
-    // For each repo, read its Dependency nodes and check against publishers
-    let mut contracts = Vec::new();
-    let mut seen: HashSet<(String, String)> = HashSet::new();
-
-    for repo_name in &group.repos {
-        let entry = match registry.repos.get(repo_name) {
-            Some(e) => e.clone(),
-            None => continue,
-        };
-
-        // Only queries the graph below — empty registry, no parsing needed.
-        let mut prism = Infigraph::open(&entry.path, LanguageRegistry::new())?;
-        prism.init()?;
-
-        let backend = match prism.backend() {
-            Some(b) => b,
-            None => continue,
-        };
-
-        let dep_rows = backend
-            .raw_query("MATCH (d:Dependency) RETURN d.name, d.version")
-            .unwrap_or_default();
-
-        for row in &dep_rows {
-            if row.is_empty() {
-                continue;
-            }
-            let dep_name = &row[0];
-            if let Some(publisher_repo) = publishers.get(dep_name) {
-                if publisher_repo != repo_name
-                    && seen.insert((repo_name.clone(), publisher_repo.clone()))
-                {
-                    contracts.push(Contract {
-                        kind: ContractKind::SharedPackage,
-                        service: publisher_repo.clone(),
-                        method: "package".to_string(),
-                        path: dep_name.clone(),
-                        symbol_id: format!("pkg::{}::{}", publisher_repo, dep_name),
-                        file: String::new(),
-                    });
-                }
-            }
-        }
-    }
-
-    Ok(contracts)
-}
-
 /// Read the published package name from a repo's manifest file.
 pub fn read_published_package_name(root: &Path) -> Option<String> {
     // Python: pyproject.toml

@@ -481,7 +481,7 @@ fn parse_return_columns(cypher: &str) -> Vec<String> {
         .iter()
         .filter_map(|kw| {
             let u = after_return.to_uppercase();
-            u.find(kw).map(|p| p)
+            u.find(kw)
         })
         .min()
         .unwrap_or(after_return.len());
@@ -975,11 +975,7 @@ impl GraphBackend for Neo4jBackend {
             .collect();
 
         let total = covered.len() + uncovered.len();
-        let pct = if total > 0 {
-            covered.len() * 100 / total
-        } else {
-            0
-        };
+        let pct = (covered.len() * 100).checked_div(total).unwrap_or(0);
 
         Ok(TestCoverage {
             covered_count: covered.len(),
@@ -1415,7 +1411,7 @@ impl GraphBackend for Neo4jBackend {
     // ── Write ────────────────────────────────────────────────────────
 
     fn upsert_file(&self, extraction: &FileExtraction) -> Result<()> {
-        self.delete_files_data(&[extraction.file.clone()])?;
+        self.delete_files_data(std::slice::from_ref(&extraction.file))?;
         self.upsert_extraction(extraction)
     }
 

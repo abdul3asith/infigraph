@@ -180,6 +180,51 @@ fn repo_entry(name: &str, path: &Path) -> RepoEntry {
     }
 }
 
+const PUBLISHER_SVC_PYPROJECT: &str = r#"[project]
+name = "my-shared-lib"
+version = "1.0.0"
+dependencies = []
+"#;
+
+const PUBLISHER_SVC_MAIN_PY: &str = r#"def publish():
+    return "published"
+"#;
+
+const CONSUMER_SVC_PYPROJECT: &str = r#"[project]
+name = "consumer-app"
+version = "1.0.0"
+dependencies = ["my-shared-lib>=1.0.0", "requests>=2.0"]
+"#;
+
+const CONSUMER_SVC_MAIN_PY: &str = r#"def consume():
+    return "consumed"
+"#;
+
+fn shared_package_group(publisher_dir: &Path, consumer_dir: &Path) -> Registry {
+    let mut registry = Registry {
+        repos: HashMap::new(),
+        groups: HashMap::new(),
+    };
+    registry.repos.insert(
+        "publisher-svc".to_string(),
+        repo_entry("publisher-svc", publisher_dir),
+    );
+    registry.repos.insert(
+        "consumer-svc".to_string(),
+        repo_entry("consumer-svc", consumer_dir),
+    );
+    registry.groups.insert(
+        "shared-pkg-test-group".to_string(),
+        Group {
+            name: "shared-pkg-test-group".to_string(),
+            org: String::new(),
+            repos: vec!["publisher-svc".to_string(), "consumer-svc".to_string()],
+            contracts: vec![],
+        },
+    );
+    registry
+}
+
 fn local_group(order_dir: &Path, payment_dir: &Path) -> Registry {
     let mut registry = Registry {
         repos: HashMap::new(),
@@ -334,6 +379,71 @@ fn test_local_step3_links_cross_service_call() {
     );
 }
 
+/// SharedPackage dependency kind: consumer-svc's manifest (pyproject.toml)
+/// depends on publisher-svc's published package name. This exercises the
+/// non-HTTP contract path in sync_group_contracts (publisher map + Dependency
+/// node matching) and detect_cross_service_deps' manifest-driven branch —
+/// verified empirically byte-for-byte identical before/after deleting the
+/// dead, duplicate detect_shared_package_deps function (same inline logic
+/// this test exercises was never the one that got deleted).
+#[test]
+fn test_local_step2_step3_shared_package_dependency() {
+    let publisher_dir = make_repo(&[
+        ("pyproject.toml", PUBLISHER_SVC_PYPROJECT),
+        ("main.py", PUBLISHER_SVC_MAIN_PY),
+    ]);
+    let consumer_dir = make_repo(&[
+        ("pyproject.toml", CONSUMER_SVC_PYPROJECT),
+        ("main.py", CONSUMER_SVC_MAIN_PY),
+    ]);
+    let mut registry = shared_package_group(publisher_dir.path(), consumer_dir.path());
+
+    multi::index_group(
+        &mut registry,
+        "shared-pkg-test-group",
+        true,
+        infigraph_languages::bundled_registry,
+    )
+    .expect("index_group should succeed");
+
+    let count = multi::sync_group_contracts(
+        &mut registry,
+        "shared-pkg-test-group",
+        infigraph_languages::bundled_registry,
+    )
+    .expect("sync_group_contracts should succeed");
+    assert!(
+        count > 0,
+        "expected at least one SharedPackage contract from publisher-svc's manifest"
+    );
+
+    let contracts = &registry
+        .groups
+        .get("shared-pkg-test-group")
+        .unwrap()
+        .contracts;
+    let shared_pkg_contract = contracts
+        .iter()
+        .find(|c| c.kind == multi::ContractKind::SharedPackage && c.path == "my-shared-lib");
+    assert!(
+        shared_pkg_contract.is_some(),
+        "expected a SharedPackage contract for 'my-shared-lib' published by publisher-svc; got {contracts:?}"
+    );
+    assert_eq!(shared_pkg_contract.unwrap().service, "publisher-svc");
+
+    let linked = multi::link_cross_service_calls(
+        &registry,
+        "shared-pkg-test-group",
+        infigraph_languages::bundled_registry,
+    )
+    .expect("link_cross_service_calls should succeed");
+    assert!(
+        linked > 0,
+        "expected at least one CALLS_SERVICE-derived edge from consumer-svc's \
+         manifest dependency on publisher-svc's shared package"
+    );
+}
+
 /// THE regression guard: order-service (caller) is left completely unchanged.
 /// payment-service (producer) gains a NEW route after the first build. A naive
 /// "skip Steps 2/3 for repos not in Step 1's changed-set" optimization would skip
@@ -485,7 +595,7 @@ fn test_local_step4_build_combined_graph_merges_repos() {
 #[cfg(feature = "neo4j")]
 mod remote {
     use super::*;
-    use infigraph_core::graph::Neo4jBackend;
+    use infigraph_core::graph::{GraphBackend, Neo4jBackend};
     use infigraph_core::meta::PostgresMetaStore;
 
     fn connect_pg() -> PostgresMetaStore {
@@ -500,9 +610,9 @@ mod remote {
     }
 
     fn clean_pg(pg: &PostgresMetaStore) {
-        let _ = pg.delete_group("remote-xsvc-steps-group");
-        let _ = pg.delete_repo("order-service");
-        let _ = pg.delete_repo("payment-service");
+        pg.execute_raw("DELETE FROM group_repos").ok();
+        pg.execute_raw("DELETE FROM groups").ok();
+        pg.execute_raw("DELETE FROM repos").ok();
     }
 
     fn setup_remote_group(order_dir: &Path, payment_dir: &Path, group_name: &str) -> Registry {
@@ -568,6 +678,8 @@ mod remote {
     fn test_remote_step1_skips_unchanged_repo_on_second_run() {
         let order_dir = make_repo(&[("src/client.ts", ORDER_SERVICE_TS_CLIENT)]);
         let payment_dir = make_repo(&[("src/handlers.rs", PAYMENT_SERVICE_RS_HANDLERS)]);
+        git_commit_all(order_dir.path(), "init order-service");
+        git_commit_all(payment_dir.path(), "init payment-service");
         let mut registry = setup_remote_group(
             order_dir.path(),
             payment_dir.path(),
@@ -667,6 +779,86 @@ mod remote {
         teardown_remote();
     }
 
+    /// SharedPackage (remote): mirrors the local
+    /// test_local_step2_step3_shared_package_dependency test above against live
+    /// Neo4j + Postgres. setup_remote_group is hardcoded to
+    /// order-service/payment-service repo names, so this sets up its own
+    /// publisher-svc/consumer-svc pair the same way rather than editing the
+    /// shared helper.
+    #[test]
+    #[ignore]
+    fn test_remote_shared_package_dependency() {
+        let publisher_dir = make_repo(&[
+            ("pyproject.toml", PUBLISHER_SVC_PYPROJECT),
+            ("main.py", PUBLISHER_SVC_MAIN_PY),
+        ]);
+        let consumer_dir = make_repo(&[
+            ("pyproject.toml", CONSUMER_SVC_PYPROJECT),
+            ("main.py", CONSUMER_SVC_MAIN_PY),
+        ]);
+
+        std::env::set_var("INFIGRAPH_BACKEND", "neo4j");
+        let pg = connect_pg();
+        clean_pg(&pg);
+        let neo = connect_neo4j();
+        neo.raw_query("MATCH (n) DETACH DELETE n")
+            .expect("clear neo4j graph before test");
+
+        pg.upsert_repo(
+            "publisher-svc",
+            &repo_entry("publisher-svc", publisher_dir.path()),
+        )
+        .expect("seed publisher-svc repo");
+        pg.upsert_repo(
+            "consumer-svc",
+            &repo_entry("consumer-svc", consumer_dir.path()),
+        )
+        .expect("seed consumer-svc repo");
+        pg.create_group("remote-shared-pkg-group")
+            .expect("create group");
+        pg.group_add("remote-shared-pkg-group", "publisher-svc")
+            .expect("add publisher-svc");
+        pg.group_add("remote-shared-pkg-group", "consumer-svc")
+            .expect("add consumer-svc");
+
+        let mut registry =
+            Registry::load().expect("load registry via Postgres (INFIGRAPH_BACKEND=neo4j)");
+
+        multi::index_group(
+            &mut registry,
+            "remote-shared-pkg-group",
+            true,
+            infigraph_languages::bundled_registry,
+        )
+        .expect("index_group should succeed");
+        let count = multi::sync_group_contracts(
+            &mut registry,
+            "remote-shared-pkg-group",
+            infigraph_languages::bundled_registry,
+        )
+        .expect("sync_group_contracts should succeed");
+        assert!(
+            count > 0,
+            "expected at least one SharedPackage contract from publisher-svc's manifest"
+        );
+
+        let linked = multi::link_cross_service_calls(
+            &registry,
+            "remote-shared-pkg-group",
+            infigraph_languages::bundled_registry,
+        )
+        .expect("link_cross_service_calls should succeed");
+        assert!(
+            linked > 0,
+            "expected at least one CALLS_SERVICE-derived edge from consumer-svc's \
+             manifest dependency on publisher-svc's shared package"
+        );
+
+        neo.raw_query("MATCH (n) DETACH DELETE n").ok();
+        clean_pg(&pg);
+        std::env::remove_var("INFIGRAPH_BACKEND");
+    }
+
     /// Step 3 (remote), THE regression guard — remote mirror of the local
     /// crown-jewel test above. Unchanged caller must still link to a producer's
     /// newly added route on an incremental remote build.
@@ -675,6 +867,8 @@ mod remote {
     fn test_remote_incremental_build_links_unchanged_caller_to_newly_changed_producer_route() {
         let order_dir = make_repo(&[("src/client.ts", ORDER_SERVICE_TS_CLIENT_V2_CALLS_REFUNDS)]);
         let payment_dir = make_repo(&[("src/handlers.rs", PAYMENT_SERVICE_RS_HANDLERS)]);
+        git_commit_all(order_dir.path(), "init order-service");
+        git_commit_all(payment_dir.path(), "init payment-service");
         let mut registry = setup_remote_group(
             order_dir.path(),
             payment_dir.path(),
@@ -694,7 +888,7 @@ mod remote {
             infigraph_languages::bundled_registry,
         )
         .expect("first sync_group_contracts should succeed");
-        let linked_before = multi::link_cross_service_calls(
+        multi::link_cross_service_calls(
             &registry,
             "remote-xsvc-steps-group",
             infigraph_languages::bundled_registry,
@@ -706,32 +900,59 @@ mod remote {
             PAYMENT_SERVICE_RS_HANDLERS_V2,
         )
         .expect("update payment-service route file");
+        git_commit_all(payment_dir.path(), "add /api/refunds route");
 
-        multi::index_group(
+        let results = multi::index_group(
             &mut registry,
             "remote-xsvc-steps-group",
             false,
             infigraph_languages::bundled_registry,
         )
         .expect("second index_group should succeed");
+        let changed_repos: Vec<&str> = results.iter().map(|(r, _, _)| r.as_str()).collect();
+        assert!(
+            changed_repos.contains(&"payment-service"),
+            "payment-service's new commit should put it in Step 1's changed set; got {changed_repos:?}"
+        );
+        assert!(
+            !changed_repos.contains(&"order-service"),
+            "order-service's commit did not change — it must be genuinely skip-gated by \
+             Step 1 for this test to guard anything; got {changed_repos:?}"
+        );
+
         multi::sync_group_contracts(
             &mut registry,
             "remote-xsvc-steps-group",
             infigraph_languages::bundled_registry,
         )
         .expect("second sync_group_contracts should succeed");
-        let linked_after = multi::link_cross_service_calls(
+        multi::link_cross_service_calls(
             &registry,
             "remote-xsvc-steps-group",
             infigraph_languages::bundled_registry,
         )
         .expect("second link_cross_service_calls should succeed");
 
+        // Query order-service's own graph directly for the new edge, rather than
+        // comparing linked-edge counts across builds — edges persist across
+        // builds so a count delta can't distinguish "the refunds edge now
+        // exists" from an unrelated count coincidence (see the identical fix
+        // applied to the local-mode version of this test).
+        let neo = connect_neo4j();
+        let rows = neo
+            .raw_query(
+                "MATCH (caller:Symbol)-[:CALLS_SERVICE]->(target:Symbol) \
+                 WHERE caller.id STARTS WITH 'order-service/' AND target.id CONTAINS 'refunds' \
+                 RETURN caller.id, target.id",
+            )
+            .expect("query for refunds CALLS_SERVICE edge");
         assert!(
-            linked_after > linked_before,
-            "unchanged order-service must still link to payment-service's new /api/refunds \
-             route on an incremental remote build. linked_before={linked_before} linked_after={linked_after}"
+            !rows.is_empty(),
+            "expected a CALLS_SERVICE edge from order-service into payment-service's new \
+             /api/refunds route, even though order-service (the caller) was skip-gated as \
+             unchanged by Step 1. Found rows: {rows:?}"
         );
+
         teardown_remote();
     }
 
