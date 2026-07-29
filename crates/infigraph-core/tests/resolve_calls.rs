@@ -445,6 +445,81 @@ fn test_resolve_empty_extractions() {
 }
 
 #[test]
+fn test_resolve_class_method_calling_imported_function_no_duplicate_edge() {
+    // Regression for AIF3X-331 #14: a class method's call site is emitted with
+    // an unqualified source_id (file::method, no class segment), which forces
+    // the file_name_to_ids fallback expansion in resolve_with_map. That map is
+    // populated once from extractions and once from symbol_map, so the same
+    // target id could be pushed twice for one (file, name) key — fanning a
+    // single call site out into two identical CALLS edges.
+    let extractions = vec![
+        FileExtraction {
+            file: "risk_service.py".to_string(),
+            language: "python".to_string(),
+            content_hash: "a".to_string(),
+            symbols: vec![sym(
+                "risk_service.py::do_input_risk_screening",
+                "do_input_risk_screening",
+                SymbolKind::Function,
+                "risk_service.py",
+                1,
+                3,
+            )],
+            relations: vec![],
+            statements: vec![],
+        },
+        FileExtraction {
+            file: "chat_service.py".to_string(),
+            language: "python".to_string(),
+            content_hash: "b".to_string(),
+            symbols: vec![
+                sym(
+                    "chat_service.py::ChatService",
+                    "ChatService",
+                    SymbolKind::Class,
+                    "chat_service.py",
+                    1,
+                    10,
+                ),
+                sym(
+                    "chat_service.py::ChatService::process_chat_request",
+                    "process_chat_request",
+                    SymbolKind::Method,
+                    "chat_service.py",
+                    4,
+                    9,
+                ),
+            ],
+            relations: vec![
+                // Unqualified source_id, as find_enclosing_function emits it.
+                call(
+                    "chat_service.py::process_chat_request",
+                    "risk_service.py::do_input_risk_screening",
+                ),
+                import("chat_service.py", "risk_service"),
+            ],
+            statements: vec![],
+        },
+    ];
+
+    let env = TestEnv::new(&extractions);
+    let stats = resolve::resolve_calls(&env.store, &extractions, None).unwrap();
+    assert_eq!(stats.resolved, 1);
+
+    let conn = env.store.connection().unwrap();
+    let q = infigraph_core::graph::GraphQuery::new(&conn);
+    let callees = q
+        .callees_of("chat_service.py::ChatService::process_chat_request")
+        .unwrap();
+    assert_eq!(
+        callees.len(),
+        1,
+        "expected exactly one CALLS edge, got: {:?}",
+        callees
+    );
+}
+
+#[test]
 fn test_resolve_unresolvable_builtin() {
     let extractions = vec![FileExtraction {
         file: "main.py".to_string(),

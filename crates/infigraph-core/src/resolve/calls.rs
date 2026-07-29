@@ -348,11 +348,17 @@ fn resolve_with_map(
             })
             .collect();
 
+        // file_name_to_ids can carry the same id twice for one (file, name) key
+        // (populated once from extractions and once from symbol_map), which
+        // would otherwise fan a single call site out into duplicate CALLS edges.
+        let mut seen_pairs: std::collections::HashSet<&(String, String)> =
+            std::collections::HashSet::new();
         let valid_pairs: Vec<&(String, String)> = fixed_pairs
             .iter()
             .filter(|(src, tgt)| {
                 known_ids.contains(src.as_str()) && known_ids.contains(tgt.as_str())
             })
+            .filter(|pair| seen_pairs.insert(pair))
             .collect();
 
         let refs: Vec<(&str, &str)> = valid_pairs
