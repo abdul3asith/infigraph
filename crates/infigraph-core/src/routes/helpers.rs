@@ -103,50 +103,6 @@ pub(crate) fn detect_from_docstring(
     })
 }
 
-pub(crate) fn detect_python_framework(doc_lower: &str) -> String {
-    if doc_lower.contains("fastapi") {
-        "fastapi".to_string()
-    } else if doc_lower.contains("flask")
-        || doc_lower.contains("@app.")
-        || doc_lower.contains("@blueprint.")
-    {
-        "flask".to_string()
-    } else if doc_lower.contains("django") {
-        "django".to_string()
-    } else if doc_lower.contains("starlette") {
-        "starlette".to_string()
-    } else if doc_lower.contains("tornado") {
-        "tornado".to_string()
-    } else if doc_lower.contains("aiohttp") {
-        "aiohttp".to_string()
-    } else {
-        "generic_python".to_string()
-    }
-}
-
-pub(crate) fn detect_js_framework(file: &str, doc_lower: &str) -> String {
-    let file_lower = file.to_lowercase();
-    if doc_lower.contains("nestjs")
-        || doc_lower.contains("@controller")
-        || doc_lower.contains("@get(")
-        || doc_lower.contains("@post(")
-    {
-        "nestjs".to_string()
-    } else if file_lower.contains("pages/api/") || file_lower.contains("app/api/") {
-        "nextjs".to_string()
-    } else if doc_lower.contains("fastify") {
-        "fastify".to_string()
-    } else if doc_lower.contains("koa") {
-        "koa".to_string()
-    } else if doc_lower.contains("hapi") {
-        "hapi".to_string()
-    } else if doc_lower.contains("express") {
-        "express".to_string()
-    } else {
-        "generic_js".to_string()
-    }
-}
-
 pub(crate) fn detect_go_framework(doc_lower: &str) -> String {
     if doc_lower.contains("gin.") || doc_lower.contains("gin ") {
         "gin".to_string()
@@ -163,47 +119,21 @@ pub(crate) fn detect_go_framework(doc_lower: &str) -> String {
     }
 }
 
-pub(crate) fn detect_java_framework(doc_lower: &str) -> String {
-    if doc_lower.contains("@getmapping")
-        || doc_lower.contains("@postmapping")
-        || doc_lower.contains("@requestmapping")
-        || doc_lower.contains("@putmapping")
-        || doc_lower.contains("@deletemapping")
-        || doc_lower.contains("@patchmapping")
-    {
-        "spring".to_string()
-    } else if doc_lower.contains("@path")
-        || doc_lower.contains("jax-rs")
-        || doc_lower.contains("javax.ws.rs")
-    {
-        "jaxrs".to_string()
-    } else if doc_lower.contains("micronaut") {
-        "micronaut".to_string()
-    } else if doc_lower.contains("quarkus") {
-        "quarkus".to_string()
-    } else if doc_lower.contains("ktor") {
-        "ktor".to_string()
-    } else {
-        "spring".to_string()
-    }
-}
-
-pub(crate) fn detect_rust_framework(doc_lower: &str) -> String {
-    if doc_lower.contains("actix") {
-        "actix".to_string()
-    } else if doc_lower.contains("axum") {
-        "axum".to_string()
-    } else if doc_lower.contains("rocket")
-        || doc_lower.contains("#[get")
-        || doc_lower.contains("#[post")
-    {
-        "rocket".to_string()
-    } else if doc_lower.contains("warp") {
-        "warp".to_string()
-    } else if doc_lower.contains("tide") {
-        "tide".to_string()
-    } else {
-        "generic_rust".to_string()
+/// Best-effort framework label for a `Route`-kind (registration) symbol, keyed
+/// off the source file extension since the registration site has no decorator
+/// docstring to inspect.
+pub(crate) fn detect_framework_from_file(file: &str) -> String {
+    match language_from_file(file) {
+        Lang::Python => "python".to_string(),
+        Lang::JavaScript | Lang::TypeScript => "express".to_string(),
+        Lang::Go => "net/http".to_string(),
+        Lang::Java => "spring".to_string(),
+        Lang::Rust => "rust".to_string(),
+        Lang::Ruby => "rails".to_string(),
+        Lang::Php => "laravel".to_string(),
+        Lang::CSharp => "aspnet".to_string(),
+        Lang::Elixir => "phoenix".to_string(),
+        Lang::Other => "unknown".to_string(),
     }
 }
 
@@ -315,41 +245,4 @@ pub(crate) fn camel_to_path(s: &str) -> String {
     }
     // Also convert underscores to slashes
     result.replace('_', "/")
-}
-
-/// Infer a route path from the file path (useful for Next.js API routes, etc.).
-pub(crate) fn infer_path_from_file(file: &str) -> String {
-    // Next.js: pages/api/users/[id].ts -> /api/users/:id
-    // Also: app/api/users/route.ts -> /api/users
-    let normalized = file.replace('\\', "/").to_lowercase();
-
-    // Try to extract the API route part
-    if let Some(api_idx) = normalized.find("/api/") {
-        let path_part = &file[api_idx..];
-        let cleaned = path_part
-            .trim_end_matches(".ts")
-            .trim_end_matches(".tsx")
-            .trim_end_matches(".js")
-            .trim_end_matches(".jsx")
-            .trim_end_matches("/route")
-            .trim_end_matches("/index");
-        // Convert [param] to :param
-        let result = cleaned.replace('[', ":").replace(']', "");
-        return result;
-    }
-
-    // Fallback: use the file stem
-    let stem = file
-        .rsplit('/')
-        .next()
-        .unwrap_or(file)
-        .trim_end_matches(".ts")
-        .trim_end_matches(".tsx")
-        .trim_end_matches(".js")
-        .trim_end_matches(".jsx")
-        .trim_end_matches(".py")
-        .trim_end_matches(".go")
-        .trim_end_matches(".rs");
-
-    format!("/{}", stem.to_lowercase())
 }
