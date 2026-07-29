@@ -18,6 +18,13 @@
 (import_from_statement
   module_name: (dotted_name) @import.module)
 
+; Relative from-imports: from .foo import bar / from ..pkg.foo import bar.
+; module_name is (relative_import (import_prefix) (dotted_name)?) here, not a
+; bare dotted_name, so the pattern above never matches these on its own.
+(import_from_statement
+  module_name: (relative_import
+    (dotted_name) @import.module))
+
 ; Class inheritance: class Foo(Bar). superclasses can be plain identifiers, dotted
 ; names (pkg.Bar), or subscripted generics (Generic[T]); matching the "expression"
 ; supertype (rather than a bare wildcard) correctly excludes keyword_argument nodes

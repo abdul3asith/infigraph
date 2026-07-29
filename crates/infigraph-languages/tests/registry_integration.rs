@@ -128,6 +128,45 @@ fn test_extraction_smoke_python() {
     );
 }
 
+/// Regression test: `from .foo import bar` / `from ..pkg.foo import bar` parse
+/// module_name as `(relative_import (import_prefix) (dotted_name)?)`, not a
+/// bare `dotted_name` — the plain from-import query pattern doesn't match this
+/// shape at all, so every relative import silently produced zero Imports
+/// relations (AIF3X-331 #15: this broke import-scope-based CALLS resolution
+/// whenever a called function's name collided with another same-named symbol
+/// elsewhere in the codebase).
+#[test]
+fn test_extraction_python_relative_import_produces_imports_relation() {
+    use infigraph_core::model::RelationKind;
+
+    let registry = bundled_registry().unwrap();
+    let pack = registry.for_extension(".py").unwrap();
+
+    let cases = [
+        (
+            "relative_single_dot",
+            b"from .risk_service import do_input_risk_screening\n" as &[u8],
+        ),
+        (
+            "relative_double_dot",
+            b"from ..services.risk_service import do_input_risk_screening\n",
+        ),
+    ];
+
+    for (label, src) in cases {
+        let ext = infigraph_core::extract::extract_file("x.py", src, pack).unwrap();
+        let imports: Vec<_> = ext
+            .relations
+            .iter()
+            .filter(|r| r.kind == RelationKind::Imports)
+            .collect();
+        assert!(
+            imports.iter().any(|r| r.target_id.contains("risk_service")),
+            "{label}: expected an Imports relation targeting risk_service, got: {imports:?}"
+        );
+    }
+}
+
 #[test]
 fn test_extraction_smoke_rust() {
     let registry = bundled_registry().unwrap();

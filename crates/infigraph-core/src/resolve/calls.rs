@@ -150,11 +150,13 @@ fn resolve_with_map(
                 .iter()
                 .filter(|r| r.kind == RelationKind::Imports)
                 .map(|r| {
-                    let raw = r
-                        .target_id
-                        .rsplit(['/', '\\', '.'])
-                        .next()
-                        .unwrap_or(&r.target_id);
+                    // target_id is "{file}::{module}" — strip the file prefix
+                    // before taking the last dotted segment, otherwise a
+                    // bare (dot-free) module name like a relative import's
+                    // falls back to splitting the file's own ".py" extension
+                    // instead (e.g. "a/b.py::risk_service" -> "py::risk_service").
+                    let module = r.target_id.rsplit("::").next().unwrap_or(&r.target_id);
+                    let raw = module.rsplit(['/', '\\', '.']).next().unwrap_or(module);
                     raw.to_lowercase()
                 })
                 .collect();
