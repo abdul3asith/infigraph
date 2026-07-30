@@ -1369,6 +1369,94 @@ fn test_ensure_custom_edge_table_idempotent() {
     assert_eq!(rows.len(), 2, "both custom edges should exist");
 }
 
+/// AIF3X-331 #16 end-to-end: a real FastAPI `add_middleware(..., dispatch=fn)`
+/// and `Depends(fn)` registration, extracted via the actual Python tree-sitter
+/// registry (not hand-built Relations, per the #14/#15 lesson that hand-crafted
+/// relations can hide real extraction-layer bugs), should surface via
+/// GraphQuery::callers_of on the registered symbol — this is the exact battery
+/// items 6/7 from the eval report (trace_callers on validate_request_headers /
+/// v3_logging_context_middleware should show the registration site, not only
+/// unit-test callers).
+#[test]
+fn test_callers_of_surfaces_middleware_and_dependency_registrations() {
+    use infigraph_languages::bundled_registry;
+
+    let registry = bundled_registry().unwrap();
+    let pack = registry.for_extension(".py").unwrap();
+
+    let middleware_src = b"async def v3_logging_context_middleware(request, call_next):\n    return await call_next(request)\n";
+    let deps_src = b"def validate_request_headers(request):\n    return True\n";
+    let main_src = b"from app.middleware import v3_logging_context_middleware\nfrom app.deps import validate_request_headers\n\ndef create_app():\n    app.add_middleware(BaseHTTPMiddleware, dispatch=v3_logging_context_middleware)\n\nasync def handler(headers=Depends(validate_request_headers)):\n    pass\n";
+
+    let middleware_ext =
+        infigraph_core::extract::extract_file("app/middleware.py", middleware_src, pack).unwrap();
+    let deps_ext = infigraph_core::extract::extract_file("app/deps.py", deps_src, pack).unwrap();
+    let main_ext = infigraph_core::extract::extract_file("app/main.py", main_src, pack).unwrap();
+
+    let extractions = vec![middleware_ext, deps_ext, main_ext];
+
+    let tg = TestGraph::new();
+    let conn = tg.store.connection().unwrap();
+    tg.store.upsert_all_bulk(&conn, &extractions).unwrap();
+    infigraph_core::resolve::resolve_calls(&tg.store, &extractions, None).unwrap();
+
+    let q = GraphQuery::new(&conn);
+
+    let middleware_callers = q
+        .callers_of("app/middleware.py::v3_logging_context_middleware")
+        .unwrap();
+    assert!(
+        !middleware_callers.is_empty(),
+        "expected the add_middleware(dispatch=...) registration site to appear \
+         as a caller, got: {middleware_callers:?}"
+    );
+
+    let deps_callers = q
+        .callers_of("app/deps.py::validate_request_headers")
+        .unwrap();
+    assert!(
+        !deps_callers.is_empty(),
+        "expected the Depends(...) registration site to appear as a caller, \
+         got: {deps_callers:?}"
+    );
+}
+
+/// AIF3X-331 #16 safety check: callers_of's INJECTS_DEPENDENCY/
+/// REGISTERS_MIDDLEWARE union must not error when those rel tables have never
+/// been populated (e.g. a pure-Rust/Go repo with no Python) — confirmed via a
+/// live no-Python fixture that this previously raised a Kuzu binder exception
+/// ("Table ... does not exist") before both edge kinds were added to
+/// CREATE_SCHEMA (which init_schema runs unconditionally on every open).
+#[test]
+fn test_callers_of_no_error_when_custom_edge_tables_unpopulated() {
+    let tg = TestGraph::new();
+    let conn = tg.store.connection().unwrap();
+    tg.store
+        .upsert_all_bulk(
+            &conn,
+            &[FileExtraction {
+                file: "main.rs".to_string(),
+                language: "rust".to_string(),
+                content_hash: "a".to_string(),
+                symbols: vec![sym(
+                    "main.rs::main",
+                    "main",
+                    SymbolKind::Function,
+                    "main.rs",
+                    1,
+                    1,
+                )],
+                relations: vec![],
+                statements: vec![],
+            }],
+        )
+        .unwrap();
+
+    let q = GraphQuery::new(&conn);
+    let callers = q.callers_of("main.rs::main").unwrap();
+    assert!(callers.is_empty());
+}
+
 // ---------- Special characters / edge cases ----------
 
 #[test]

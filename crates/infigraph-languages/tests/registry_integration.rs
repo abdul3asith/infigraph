@@ -167,6 +167,96 @@ fn test_extraction_python_relative_import_produces_imports_relation() {
     }
 }
 
+/// AIF3X-331 #16: FastAPI `add_middleware(...)` registration should produce a
+/// REGISTERS_MIDDLEWARE custom edge naming the dispatch function (or the
+/// middleware class when there's no dispatch kwarg), so trace_callers on the
+/// registered symbol surfaces the registration site instead of only unit
+/// tests.
+#[test]
+fn test_extraction_python_add_middleware_produces_custom_edge() {
+    use infigraph_core::model::RelationKind;
+
+    let registry = bundled_registry().unwrap();
+    let pack = registry.for_extension(".py").unwrap();
+
+    let dispatch_src =
+        b"app.add_middleware(BaseHTTPMiddleware, dispatch=v3_logging_context_middleware)\n"
+            as &[u8];
+    let ext = infigraph_core::extract::extract_file("x.py", dispatch_src, pack).unwrap();
+    let custom: Vec<_> = ext
+        .relations
+        .iter()
+        .filter(|r| matches!(&r.kind, RelationKind::Custom(name) if name == "REGISTERS_MIDDLEWARE"))
+        .collect();
+    assert!(
+        custom
+            .iter()
+            .any(|r| r.target_id.contains("v3_logging_context_middleware")),
+        "expected REGISTERS_MIDDLEWARE targeting the dispatch fn, got: {custom:?}"
+    );
+
+    let class_only_src = b"app.add_middleware(RawContextMiddleware)\n" as &[u8];
+    let ext = infigraph_core::extract::extract_file("y.py", class_only_src, pack).unwrap();
+    let custom: Vec<_> = ext
+        .relations
+        .iter()
+        .filter(|r| matches!(&r.kind, RelationKind::Custom(name) if name == "REGISTERS_MIDDLEWARE"))
+        .collect();
+    assert!(
+        custom
+            .iter()
+            .any(|r| r.target_id.contains("RawContextMiddleware")),
+        "expected REGISTERS_MIDDLEWARE targeting the middleware class, got: {custom:?}"
+    );
+}
+
+/// AIF3X-331 #16: FastAPI `Depends(fn)` — both the parameter-default form and
+/// the router-level `dependencies=[Depends(fn)]` form — should produce an
+/// INJECTS_DEPENDENCY custom edge naming the dependency function.
+#[test]
+fn test_extraction_python_depends_produces_custom_edge() {
+    use infigraph_core::model::RelationKind;
+
+    let registry = bundled_registry().unwrap();
+    let pack = registry.for_extension(".py").unwrap();
+
+    let param_default_src =
+        b"async def handler(headers=Depends(validate_request_headers)):\n    pass\n" as &[u8];
+    let ext = infigraph_core::extract::extract_file("x.py", param_default_src, pack).unwrap();
+    let custom: Vec<_> = ext
+        .relations
+        .iter()
+        .filter(|r| matches!(&r.kind, RelationKind::Custom(name) if name == "INJECTS_DEPENDENCY"))
+        .collect();
+    assert!(
+        custom
+            .iter()
+            .any(|r| r.source_id.contains("handler")
+                && r.target_id.contains("validate_request_headers")),
+        "expected INJECTS_DEPENDENCY from handler to validate_request_headers, got: {custom:?}"
+    );
+
+    let router_deps_src = b"router = APIRouter(dependencies=[Depends(validate_request_headers), Depends(validate_model_in_config)])\n" as &[u8];
+    let ext = infigraph_core::extract::extract_file("y.py", router_deps_src, pack).unwrap();
+    let custom: Vec<_> = ext
+        .relations
+        .iter()
+        .filter(|r| matches!(&r.kind, RelationKind::Custom(name) if name == "INJECTS_DEPENDENCY"))
+        .collect();
+    assert!(
+        custom
+            .iter()
+            .any(|r| r.target_id.contains("validate_request_headers")),
+        "expected INJECTS_DEPENDENCY targeting validate_request_headers, got: {custom:?}"
+    );
+    assert!(
+        custom
+            .iter()
+            .any(|r| r.target_id.contains("validate_model_in_config")),
+        "expected INJECTS_DEPENDENCY targeting validate_model_in_config, got: {custom:?}"
+    );
+}
+
 #[test]
 fn test_extraction_smoke_rust() {
     let registry = bundled_registry().unwrap();
