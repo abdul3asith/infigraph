@@ -195,11 +195,21 @@ fn test_graph_tools() {
         "api_surface: public Python class 'BaseModel' must appear: {result}"
     );
 
-    // --- get_file_deps ---
+    // --- get_file_deps (AIF3X-331 #20b) ---
+    // src/main.py has `from src.lib import process`. Import targets are captured
+    // as bare module names ("src.lib"), which previously never resolved to a
+    // Module file id, so IMPORTS edges were never created and this returned no
+    // dependencies. The import-resolution fix in upsert_all_bulk resolves the
+    // module name to src/lib.py, so it must now appear as a dependency.
     let result = tool_get_file_deps(&a(json!({"file": "src/main.py"}))).unwrap();
     assert!(
         result.contains("src/main.py") || result.contains("dependencies"),
         "file_deps: missing file name: {result}"
+    );
+    assert!(
+        result.contains("src/lib.py"),
+        "file_deps: src/main.py imports src/lib.py — the resolved IMPORTS edge \
+         must appear (import module-name→file resolution regressed?): {result}"
     );
 
     // --- get_type_hierarchy ---
