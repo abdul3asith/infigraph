@@ -101,6 +101,15 @@ pub(crate) fn scan_file(
                 }
             }
 
+            if let Some(required) = rule.require_any {
+                if !required
+                    .iter()
+                    .any(|kw| super::rules::contains_word(&line_lower, kw))
+                {
+                    continue;
+                }
+            }
+
             let col = line_lower.find(rule.pattern).unwrap_or(0) as u32 + 1;
             let category = (rule.category)();
 

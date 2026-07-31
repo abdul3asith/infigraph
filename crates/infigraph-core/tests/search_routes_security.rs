@@ -158,14 +158,127 @@ fn test_scan_project_hardcoded_password() {
 #[test]
 fn test_scan_project_sql_injection() {
     let tmp = tempfile::tempdir().unwrap();
+    // Inline injection on the execute() line itself -- AIF3X-331 #17 made
+    // SEC001 require a same-line SQL keyword (see
+    // test_scan_project_http_client_execute_is_not_sql_injection for why),
+    // so the fixture must carry real SQL evidence on the execute() line
+    // rather than relying on a bare variable built on a previous line.
     std::fs::write(
         tmp.path().join("query.py"),
-        "def run(user_input):\n    query = \"SELECT * FROM users WHERE id = \" + user_input\n    cursor.execute(query)\n",
+        "def run(user_input):\n    cursor.execute(\"SELECT * FROM users WHERE id = \" + user_input)\n",
     ).unwrap();
     let stats = scan_project(tmp.path()).unwrap();
     assert!(
         !stats.findings.is_empty(),
         "should detect SQL injection pattern"
+    );
+    assert!(
+        stats.findings.iter().any(|f| f.rule_id == "SEC001"),
+        "should be SEC001, got: {:?}",
+        stats.findings
+    );
+}
+
+/// AIF3X-331 #17: async HTTP client .execute() calls were being flagged as
+/// SQL injection (SEC001) purely because of the bare `execute(` substring
+/// match -- report cited this across AWS/Azure/GCP/SRF/ORCA clients.
+#[test]
+fn test_scan_project_http_client_execute_is_not_sql_injection() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("client.py"),
+        "async def call_service(self, request):\n    return await self.http_client.execute(request)\n",
+    )
+    .unwrap();
+    let stats = scan_project(tmp.path()).unwrap();
+    assert!(
+        !stats.findings.iter().any(|f| f.rule_id == "SEC001"),
+        "http_client.execute() should not be flagged as SQL injection, got: {:?}",
+        stats.findings
+    );
+}
+
+/// AIF3X-331 #17: same fix must not create a false negative for the common
+/// SQLAlchemy pattern (`session.execute(text("SELECT ..."))`), which was the
+/// reason a receiver-name denylist was rejected in favor of requiring
+/// same-line SQL evidence instead.
+#[test]
+fn test_scan_project_sqlalchemy_execute_still_flagged() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("query.py"),
+        "def run(user_input):\n    session.execute(text(\"SELECT * FROM users WHERE id = \" + user_input))\n",
+    )
+    .unwrap();
+    let stats = scan_project(tmp.path()).unwrap();
+    assert!(
+        stats.findings.iter().any(|f| f.rule_id == "SEC001"),
+        "session.execute(text(\"SELECT ...\")) should still be flagged, got: {:?}",
+        stats.findings
+    );
+}
+
+/// AIF3X-331 #17 word-boundary regression: a bare substring match on the
+/// SQL-keyword requirement would treat "delete" inside "delete_resource" (or
+/// "from" inside "platform"/"transform") as SQL evidence, refiring the exact
+/// false positive this fix removes. Word-boundary matching (not
+/// `.contains()`) is required to actually distinguish these.
+#[test]
+fn test_scan_project_http_client_execute_same_line_crud_name_not_flagged() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("client.py"),
+        "async def call(self, request):\n    return await self.http_client.execute(self.delete_resource_url(request))\n",
+    )
+    .unwrap();
+    let stats = scan_project(tmp.path()).unwrap();
+    assert!(
+        !stats.findings.iter().any(|f| f.rule_id == "SEC001"),
+        "execute() with a CRUD-named helper on the same line should not be flagged \
+         (word-boundary match must reject \"delete\" inside \"delete_resource_url\"), got: {:?}",
+        stats.findings
+    );
+}
+
+/// AIF3X-331 #17 residual: "DELETE"/"UPDATE" are HTTP verbs too, not just SQL
+/// keywords -- a request built with `method="DELETE"` on the same line as
+/// `.execute(` would still satisfy a naive require_any check even with
+/// word-boundary matching (the verb is quoted, so both flanks are boundaries).
+/// Real SQL DELETE/UPDATE injections carry `from`/`where` on the same line,
+/// so dropping the two verbs from the keyword list removes this FP without
+/// losing SQL detection.
+#[test]
+fn test_scan_project_http_client_execute_with_delete_verb_not_flagged() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("client.py"),
+        "async def call(self, request):\n    return await self.http_client.execute(Request(method=\"DELETE\", url=self.build_url()))\n",
+    )
+    .unwrap();
+    let stats = scan_project(tmp.path()).unwrap();
+    assert!(
+        !stats.findings.iter().any(|f| f.rule_id == "SEC001"),
+        "execute() with method=\"DELETE\" (an HTTP verb, not SQL) should not be flagged, got: {:?}",
+        stats.findings
+    );
+}
+
+/// AIF3X-331 #17: dropping "delete"/"update" from SEC001's require_any list
+/// must not create a false negative for real SQL DELETE/UPDATE injections,
+/// which carry `from`/`where` on the same line.
+#[test]
+fn test_scan_project_sql_delete_injection_still_flagged_via_where() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("query.py"),
+        "def run(user_input):\n    cursor.execute(\"DELETE FROM users WHERE id = \" + user_input)\n",
+    )
+    .unwrap();
+    let stats = scan_project(tmp.path()).unwrap();
+    assert!(
+        stats.findings.iter().any(|f| f.rule_id == "SEC001"),
+        "DELETE FROM ... WHERE ... via execute() should still be flagged, got: {:?}",
+        stats.findings
     );
 }
 
