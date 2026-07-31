@@ -591,6 +591,24 @@ pub fn detect_cross_service_deps(
                             .ok()
                             .and_then(|rows| rows.into_iter().next())
                             .and_then(|row| row.into_iter().next())
+                            // A stub imported at module level (e.g. line 1) sits
+                            // outside any symbol's line range, so the enclosing-
+                            // symbol lookup misses. Fall back to any symbol in the
+                            // file so the edge attaches to a REAL node (same policy
+                            // as the SharedPackage import scan) — a synthetic
+                            // "file:line" id would match no node and silently drop
+                            // the CALLS_SERVICE edge at link time.
+                            .or_else(|| {
+                                let fq = format!(
+                                    "MATCH (s:Symbol) WHERE s.file = '{}' RETURN s.id ORDER BY s.start_line ASC LIMIT 1",
+                                    escaped_file
+                                );
+                                backend
+                                    .raw_query(&fq)
+                                    .ok()
+                                    .and_then(|rows| rows.into_iter().next())
+                                    .and_then(|row| row.into_iter().next())
+                            })
                             .unwrap_or_else(|| format!("{}:{}", file, line_hint))
                     } else {
                         line_hint.clone()

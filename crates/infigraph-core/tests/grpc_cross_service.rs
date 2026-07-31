@@ -20,12 +20,19 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Mutex;
 
 use infigraph_core::extract::extract_file;
 use infigraph_core::graph::{GraphBackend, KuzuBackend};
+use infigraph_core::multi::combined::{build_combined_graph, combined_query};
 use infigraph_core::multi::grpc::extract_grpc_contracts;
 use infigraph_core::multi::{self, ContractKind, Group, Registry, RepoEntry};
 use infigraph_languages::bundled_registry;
+
+// The combined graph is a $HOME-keyed singleton per group name; serialize the
+// tests that build it and isolate HOME so they don't collide (mirrors
+// combined_graph.rs's COMBINED_LOCK convention).
+static COMBINED_LOCK: Mutex<()> = Mutex::new(());
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -350,6 +357,62 @@ fn test_local_grpc_producer_does_not_self_link() {
             .iter()
             .any(|d| d.target_method == "GRPC" && d.caller_service == "user-service"),
         "producer must not self-link as a gRPC consumer: {deps:?}"
+    );
+}
+
+// ── Layer 4: combined-graph promotion (#21b) ─────────────────────────────────
+
+/// Combined-graph Phase 3 promotes the service-level gRPC CALLS_SERVICE edge
+/// into a real CALLS edge landing on a concrete RPC symbol of the producer.
+/// The dep is service-level (path "/UserService"); the GrpcService contract is
+/// RPC-level (path "/UserService/GetUser") — Phase 3 reconciles the granularity
+/// by keying the contract map at "/Service" (the fix in combined.rs).
+///
+#[test]
+fn test_combined_graph_promotes_grpc_call_to_real_edge() {
+    let _guard = COMBINED_LOCK.lock().unwrap();
+    let home = tempfile::TempDir::new().unwrap();
+    let orig_home = std::env::var("HOME").unwrap_or_default();
+    std::env::set_var("HOME", home.path());
+
+    let producer = make_repo(&[("user.proto", PROTO_PRODUCER)]);
+    let consumer = make_repo(&[("gateway.py", PY_CONSUMER)]);
+    let mut registry = two_repo_group(
+        ("user-service", producer.path()),
+        ("api-gateway", consumer.path()),
+        "grpc-combined-group",
+    );
+
+    multi::index_group(&mut registry, "grpc-combined-group", true, bundled_registry)
+        .expect("index_group");
+    multi::sync_group_contracts(&mut registry, "grpc-combined-group", bundled_registry)
+        .expect("sync_group_contracts");
+    // link writes CALLS_SERVICE edges into the caller's per-repo graph, which
+    // build_combined_graph then merges and promotes.
+    let linked =
+        multi::link_cross_service_calls(&registry, "grpc-combined-group", bundled_registry)
+            .expect("link_cross_service_calls");
+    assert!(
+        linked > 0,
+        "expected a gRPC CALLS_SERVICE edge before combining"
+    );
+
+    build_combined_graph(&registry, "grpc-combined-group").expect("build_combined_graph");
+
+    // A real CALLS edge from the consumer's symbol into the producer's RPC
+    // symbol (GetUser) must exist — this is the promotion the fix enables.
+    let rows = combined_query(
+        "grpc-combined-group",
+        "MATCH (a:Symbol)-[:CALLS]->(b:Symbol) WHERE b.name = 'GetUser' RETURN a.id, b.id",
+    )
+    .expect("combined_query");
+
+    std::env::set_var("HOME", &orig_home);
+
+    assert!(
+        !rows.is_empty(),
+        "combined graph should promote the gRPC CALLS_SERVICE edge into a real \
+         CALLS edge landing on the producer's GetUser RPC symbol; got no rows"
     );
 }
 
