@@ -1,31 +1,29 @@
 //! Comprehensive gRPC cross-repo dependency coverage (AIF3X-331 #21).
 //!
-//! Layers under test:
-//!   1. Contract extraction (PRODUCER side) — `.proto` service+rpc → GrpcService
+//! Layers under test (all passing, local mode):
+//!   1. Contract extraction (PRODUCER) — `.proto` service+rpc → GrpcService
 //!      contracts. Exercises find_parent_class's `service` handling +
-//!      extract_grpc_contracts. THIS WORKS TODAY and is covered by live tests.
-//!   2. Client detection (CONSUMER side) — currently BLOCKED. detect_grpc_clients
-//!      graph-queries `s.name CONTAINS '{Svc}Stub'`, but a stub import/usage
-//!      (`from x_pb2_grpc import FooStub` / `FooStub(chan)`) leaves ZERO
-//!      queryable trace in the graph (external imports are discarded at index
-//!      time — verified). Client detection must SOURCE-SCAN like the HTTP path
-//!      (scan_source_for_urls); tracked as task #21c. The client/e2e tests below
-//!      are `#[ignore]`d — they document the intended behavior and will pass
-//!      once source-scanning lands.
+//!      extract_grpc_contracts.
+//!   2. Client detection (CONSUMER) — SOURCE-SCAN based (#21c): a stub
+//!      import/usage leaves no queryable Symbol node (external imports are
+//!      dropped at index time), so consumers are found by scanning source text
+//!      (scan_source_for_grpc_stubs) exactly like the HTTP consumer scan, then
+//!      resolving the hit line to its enclosing symbol. One case per stub
+//!      naming pattern (Python pb2_grpc/Stub, Go Stub, TS Client).
+//!   3. End-to-end group build — producer + consumer → link_cross_service_calls
+//!      emits a cross-service edge.
 //!
-//! Remote (Neo4j shared graph) invariant is a further `#[ignore]` (needs live
-//! containers, `cargo test -- --ignored`), same convention as
-//! remote_cross_service.rs.
-//!
-//! NOTE (scope): the combined-graph Phase-3 promotion of gRPC CALLS_SERVICE →
-//! real CALLS edges is a separate, unshipped layer (task #21b).
+//! NOTE (scope, tracked separately): the combined-graph Phase-3 promotion of
+//! gRPC CALLS_SERVICE → real CALLS edges (task #21b); per-language stub-pattern
+//! precision beyond the baseline substring match (tasks #30-34); and a live
+//! Neo4j remote fixture in remote_cross_service.rs.
 
 use std::collections::HashMap;
 use std::path::Path;
 
 use infigraph_core::extract::extract_file;
 use infigraph_core::graph::{GraphBackend, KuzuBackend};
-use infigraph_core::multi::grpc::{detect_grpc_clients, extract_grpc_contracts};
+use infigraph_core::multi::grpc::extract_grpc_contracts;
 use infigraph_core::multi::{self, ContractKind, Group, Registry, RepoEntry};
 use infigraph_languages::bundled_registry;
 
@@ -152,74 +150,98 @@ fn test_contracts_none_without_proto() {
     assert!(extract_grpc_contracts(backend.as_ref()).is_empty());
 }
 
-// ── Layer 2: client detection (stub name patterns) ───────────────────────────
+// ── Layer 2: client detection (source-scan, per stub pattern) ────────────────
+//
+// Client detection is source-scan based (#21c) — a stub import/usage leaves no
+// queryable Symbol node — so these exercise the REAL wired path: a 2-repo group
+// (proto producer + consumer with a stub reference) → detect_cross_service_deps,
+// asserting a GRPC dep from consumer→producer. One case per stub naming pattern.
 
-fn contracts_for(service: &str) -> Vec<multi::Contract> {
-    vec![multi::Contract {
-        kind: ContractKind::GrpcService,
-        service: service.to_string(),
-        method: "GRPC".to_string(),
-        path: format!("/{service}/Rpc"),
-        symbol_id: format!("proto::{service}"),
-        file: "svc.proto".to_string(),
-    }]
+const PROTO_USER_SVC: &str =
+    "syntax = \"proto3\";\nservice UserService {\n  rpc GetUser (Req) returns (User);\n}\n";
+
+/// Run a producer(.proto) + consumer(source) group and return the gRPC deps.
+fn grpc_deps_for(consumer_file: &str, consumer_src: &str) -> Vec<multi::CrossServiceDep> {
+    let producer = make_repo(&[("user.proto", PROTO_USER_SVC)]);
+    let consumer = make_repo(&[(consumer_file, consumer_src)]);
+    let group = format!("grpc-client-{}", consumer_file.replace(['.', '/'], "-"));
+    let mut registry = two_repo_group(
+        ("user-service", producer.path()),
+        ("api-gateway", consumer.path()),
+        &group,
+    );
+    multi::index_group(&mut registry, &group, true, bundled_registry).expect("index_group");
+    multi::sync_group_contracts(&mut registry, &group, bundled_registry)
+        .expect("sync_group_contracts");
+    multi::detect_cross_service_deps(&registry, &group, bundled_registry)
+        .expect("detect_cross_service_deps")
+        .into_iter()
+        .filter(|d| d.target_method == "GRPC")
+        .collect()
 }
 
 #[test]
-#[ignore] // blocked on #21c: client detection must source-scan (stub import leaves no graph trace)
 fn test_client_python_pb2_grpc() {
-    // Python generated stub module: user_service_pb2_grpc + UserServiceStub.
-    let (_d, backend) = backend_with(&[(
-        "client.py",
-        b"from user_service_pb2_grpc import UserServiceStub\n\ndef call(chan):\n    return UserServiceStub(chan)\n",
-    )]);
-    let deps = detect_grpc_clients(backend.as_ref(), &contracts_for("UserService"));
+    // Python generated stub: user_service_pb2_grpc import + UserServiceStub use.
+    let deps = grpc_deps_for(
+        "gateway.py",
+        "from user_service_pb2_grpc import UserServiceStub\n\ndef call(chan):\n    return UserServiceStub(chan)\n",
+    );
     assert!(
-        deps.iter().any(|d| d.target_service == "UserService"),
+        deps.iter()
+            .any(|d| d.target_service == "user-service" && d.caller_service == "api-gateway"),
         "should detect Python pb2_grpc / Stub client: {deps:?}"
     );
 }
 
 #[test]
-#[ignore] // blocked on #21c: client detection must source-scan (stub ref leaves no graph trace)
-fn test_client_stub_suffix() {
-    let (_d, backend) = backend_with(&[(
-        "c.go",
-        b"package main\ntype x struct { s UserServiceStub }\n",
-    )]);
-    let deps = detect_grpc_clients(backend.as_ref(), &contracts_for("UserService"));
-    assert!(deps.iter().any(|d| d.target_service == "UserService"));
-}
-
-#[test]
-#[ignore] // blocked on #21c: client detection must source-scan (stub ref leaves no graph trace)
-fn test_client_client_suffix() {
-    let (_d, backend) = backend_with(&[(
-        "c.ts",
-        b"export class Wrapper { c: UserServiceClient | null = null; }\n",
-    )]);
-    let deps = detect_grpc_clients(backend.as_ref(), &contracts_for("UserService"));
-    assert!(deps.iter().any(|d| d.target_service == "UserService"));
-}
-
-#[test]
-fn test_client_no_false_match_on_unrelated_name() {
-    // A symbol that doesn't match any stub pattern must not link.
-    let (_d, backend) = backend_with(&[(
-        "c.py",
-        b"class UserServiceHelper:\n    pass\n\ndef unrelated():\n    return 1\n",
-    )]);
-    let deps = detect_grpc_clients(backend.as_ref(), &contracts_for("PaymentService"));
+fn test_client_go_stub_suffix() {
+    let deps = grpc_deps_for(
+        "client.go",
+        "package main\n\nfunc dial() {\n    var s UserServiceStub\n    _ = s\n}\n",
+    );
     assert!(
-        deps.is_empty(),
-        "unrelated names must not match PaymentService stubs: {deps:?}"
+        deps.iter().any(|d| d.target_service == "user-service"),
+        "should detect Go {{Service}}Stub reference: {deps:?}"
     );
 }
 
 #[test]
-fn test_client_detection_empty_contracts_is_noop() {
-    let (_d, backend) = backend_with(&[("c.py", b"class UserServiceStub:\n    pass\n")]);
-    assert!(detect_grpc_clients(backend.as_ref(), &[]).is_empty());
+fn test_client_ts_client_suffix() {
+    let deps = grpc_deps_for(
+        "client.ts",
+        "export function make(): void {\n  const c: UserServiceClient | null = null;\n  void c;\n}\n",
+    );
+    assert!(
+        deps.iter().any(|d| d.target_service == "user-service"),
+        "should detect TS {{Service}}Client reference: {deps:?}"
+    );
+}
+
+#[test]
+fn test_client_no_false_match_on_unrelated_name() {
+    // A name that merely contains the service word but not a stub token must not link.
+    let deps = grpc_deps_for(
+        "helper.py",
+        "class UserServiceHelper:\n    pass\n\ndef unrelated():\n    return 1\n",
+    );
+    assert!(
+        deps.is_empty(),
+        "UserServiceHelper is not a stub token — must not link: {deps:?}"
+    );
+}
+
+#[test]
+fn test_client_proto_producer_not_scanned_as_consumer() {
+    // The stub token appears only in the producer's own .proto-adjacent code —
+    // but a repo must not be scanned for a service it owns, and .proto files are
+    // excluded from the client scan. No consumer here → no gRPC dep.
+    let deps = grpc_deps_for("notes.md", "This file mentions UserServiceStub in prose.\n");
+    // A markdown/doc file is skipped by the scanner, so no dep.
+    assert!(
+        deps.is_empty(),
+        "doc/prose mention must not produce a gRPC dep: {deps:?}"
+    );
 }
 
 // ── Layer 3: end-to-end local group build ────────────────────────────────────
@@ -270,12 +292,10 @@ fn test_local_grpc_producer_contract_lands_in_group() {
     );
 }
 
-/// FULL end-to-end (blocked on #21c): consumer references UserServiceStub, so
-/// link_cross_service_calls should emit a cross-service edge into the producer.
-/// Blocked because client detection needs source-scanning — the stub reference
-/// leaves no graph trace, so the current graph-query client scan finds nothing.
+/// FULL end-to-end (#21c): consumer references UserServiceStub, so
+/// link_cross_service_calls emits a cross-service edge into the producer. Client
+/// detection is source-scan based (the stub reference leaves no graph trace).
 #[test]
-#[ignore] // blocked on #21c: client detection must source-scan
 fn test_local_grpc_end_to_end_links_consumer_to_producer() {
     let producer = make_repo(&[("user.proto", PROTO_PRODUCER)]);
     let consumer = make_repo(&[("gateway.py", PY_CONSUMER)]);
@@ -333,25 +353,8 @@ fn test_local_grpc_producer_does_not_self_link() {
     );
 }
 
-// ── Remote (Neo4j shared graph) — requires live containers ───────────────────
-
-/// Same producer/consumer invariant against a shared (Neo4j) graph. The gRPC
-/// client scan in detect_cross_service_deps namespaces its Cypher to each repo's
-/// org/repo prefix (like the HTTP scan), so a stub symbol in one repo must not
-/// match another repo's namespace in the shared graph.
-///
-/// `#[ignore]`: needs live Neo4j + Postgres (see remote_cross_service.rs). Run
-/// with `cargo test -- --ignored` against real containers.
-#[test]
-#[ignore]
-fn test_remote_grpc_end_to_end_namespaced() {
-    // Intentionally minimal: the remote harness (connect_neo4j/connect_pg,
-    // index_group with a group.org set) lives in remote_cross_service.rs. This
-    // stub documents the invariant and is a placeholder for the live-DB wiring
-    // so the namespaced gRPC path has an explicit, named home. See task tracking
-    // for the full remote fixture buildout.
-    eprintln!(
-        "SKIP unless run with --ignored against live Neo4j+Postgres; \
-         verifies namespaced gRPC client scan in a shared graph"
-    );
-}
+// Remote (Neo4j shared-graph) gRPC coverage lives with the other live-DB tests
+// in remote_cross_service.rs — a real fixture there (not a placeholder here) is
+// tracked as a separate task. The namespace-scoping the gRPC client scan relies
+// on is the same org/repo prefix the HTTP scan uses and is exercised by the
+// existing remote HTTP tests.

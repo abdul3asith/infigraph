@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 use crate::lang::LanguageRegistry;
 use crate::Infigraph;
 
-use super::grpc::to_snake_case;
 use super::{ContractKind, Registry};
 
 /// A cross-service dependency: service A calls service B at a specific route.
@@ -511,13 +510,16 @@ pub fn detect_cross_service_deps(
         }
     }
 
-    // gRPC cross-service detection (AIF3X-331 #21). A producer defines a service
-    // in a .proto (GrpcService contracts, keyed here by service NAME → owning
-    // repo). A consumer references the generated stub by naming convention
-    // ({Service}Stub / {Service}Client / {Service}Grpc / {service}_pb2_grpc).
-    // Match consumer stub symbols to producer services to emit a dep. This is
-    // name-convention-based because protoc's generated stub names ARE the
-    // contract — the client never imports the .proto directly.
+    // gRPC cross-service detection (AIF3X-331 #21 / #21c). A producer defines a
+    // service in a .proto (GrpcService contracts, keyed here by service NAME →
+    // owning repo). A consumer references the generated stub by naming
+    // convention ({Service}Stub / {Service}Client / {Service}Grpc /
+    // {service}_pb2_grpc) — protoc's output names ARE the contract.
+    //
+    // Detection is SOURCE-SCAN based (not a graph query): a stub import/usage
+    // does not survive as a queryable Symbol node (external imports are dropped
+    // at index time), so we scan consumer source text exactly like the HTTP
+    // consumer scan above, then resolve each hit line to its enclosing symbol.
     {
         // service-name → owning service, from GrpcService contracts. Parse the
         // "/Service/Rpc" path to recover the service name.
@@ -540,6 +542,21 @@ pub fn detect_cross_service_deps(
                     Some(e) => e.clone(),
                     None => continue,
                 };
+
+                // A consumer repo shouldn't be scanned for services it owns.
+                let services_to_find: Vec<String> = grpc_owner
+                    .iter()
+                    .filter(|(_, owner)| *owner != repo_name)
+                    .map(|(svc, _)| svc.clone())
+                    .collect();
+                let stub_hits = scan_source_for_grpc_stubs(&entry.path, &services_to_find);
+                if stub_hits.is_empty() {
+                    continue;
+                }
+
+                // Resolve line hints to enclosing symbol ids via the repo graph,
+                // same as the HTTP scan. Namespaced (remote) graphs store
+                // `{ns}/{relative}` file paths, so prefix the lookup to match.
                 let mut prism = match Infigraph::open(&entry.path, LanguageRegistry::new()) {
                     Ok(p) => p,
                     Err(_) => continue,
@@ -551,54 +568,42 @@ pub fn detect_cross_service_deps(
                     Some(b) => b,
                     None => continue,
                 };
-
-                // Scope to this repo's namespace on a shared (remote/Neo4j) graph,
-                // same as the HTTP client scan above — otherwise a stub symbol in
-                // ANY repo of the shared graph would match. Local per-repo graphs
-                // store unprefixed paths, so the clause is empty there.
                 let ns = crate::multi::remote_namespace(&group.org, repo_name);
-                let ns_clause = ns
-                    .as_ref()
-                    .map(|n| format!(" AND s.file STARTS WITH '{}/'", crate::escape_str(n)))
-                    .unwrap_or_default();
 
-                for (svc_name, owner) in &grpc_owner {
-                    // The consumer repo must not be the producer of this service.
-                    if owner == repo_name {
-                        continue;
-                    }
-                    let snake = to_snake_case(svc_name);
-                    let patterns = [
-                        format!("{svc_name}Stub"),
-                        format!("{svc_name}Client"),
-                        format!("{svc_name}Grpc"),
-                        format!("{snake}_pb2_grpc"),
-                    ];
-                    for pat in &patterns {
-                        let q = format!(
-                            "MATCH (s:Symbol) WHERE s.name CONTAINS '{}' AND NOT s.file ENDS WITH '.proto'{} RETURN s.name, s.file, s.id",
-                            crate::escape_str(pat),
-                            ns_clause,
-                        );
-                        let rows = match backend.raw_query(&q) {
-                            Ok(r) => r,
-                            Err(_) => continue,
+                for (file, line_hint, svc_name) in stub_hits {
+                    let owner = match grpc_owner.get(&svc_name) {
+                        Some(o) => o.clone(),
+                        None => continue,
+                    };
+                    let caller_id = if let Some(stripped) = line_hint.strip_prefix("line:") {
+                        let line_num: i32 = stripped.parse().unwrap_or(0);
+                        let lookup_file = match &ns {
+                            Some(n) => format!("{}/{}", n, file),
+                            None => file.clone(),
                         };
-                        for row in &rows {
-                            if row.len() < 3 {
-                                continue;
-                            }
-                            deps.push(CrossServiceDep {
-                                caller_service: repo_name.clone(),
-                                caller_file: row[1].clone(),
-                                caller_symbol: row[2].clone(),
-                                target_service: owner.clone(),
-                                target_method: "GRPC".to_string(),
-                                target_path: format!("/{svc_name}"),
-                                url_found: format!("grpc://{svc_name}"),
-                            });
-                        }
-                    }
+                        let escaped_file = lookup_file.replace('\'', "\\'");
+                        let q = format!(
+                            "MATCH (s:Symbol) WHERE s.file = '{}' AND s.start_line <= {} AND s.end_line >= {} RETURN s.id ORDER BY (s.end_line - s.start_line) ASC LIMIT 1",
+                            escaped_file, line_num, line_num
+                        );
+                        backend
+                            .raw_query(&q)
+                            .ok()
+                            .and_then(|rows| rows.into_iter().next())
+                            .and_then(|row| row.into_iter().next())
+                            .unwrap_or_else(|| format!("{}:{}", file, line_hint))
+                    } else {
+                        line_hint.clone()
+                    };
+                    deps.push(CrossServiceDep {
+                        caller_service: repo_name.clone(),
+                        caller_file: file,
+                        caller_symbol: caller_id,
+                        target_service: owner,
+                        target_method: "GRPC".to_string(),
+                        target_path: format!("/{svc_name}"),
+                        url_found: format!("grpc://{svc_name}"),
+                    });
                 }
             }
         }
@@ -1469,6 +1474,103 @@ fn walk_for_contracts(
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Scan source files for gRPC client stub references (AIF3X-331 #21c).
+///
+/// A gRPC client references a generated stub by naming convention — protoc's
+/// output names ARE the contract: `{Service}Stub`, `{Service}Client`,
+/// `{Service}Grpc`, or the Python module `{service}_pb2_grpc`. These references
+/// (imports, constructor calls, type annotations) do NOT survive as queryable
+/// Symbol nodes — external imports are discarded at index time — so unlike the
+/// producer side, clients must be found by scanning source text, exactly like
+/// the HTTP consumer scan (scan_source_for_urls / scan_source_for_contracts).
+///
+/// `services` is the set of gRPC service NAMES known from GrpcService contracts.
+/// Returns (relative_file, "line:N" hint, matched_service_name) per hit; the
+/// caller resolves the line hint to the enclosing symbol id.
+fn scan_source_for_grpc_stubs(root: &Path, services: &[String]) -> Vec<(String, String, String)> {
+    if services.is_empty() {
+        return Vec::new();
+    }
+    const SKIP_DIRS: &[&str] = &[
+        ".infigraph",
+        ".git",
+        "node_modules",
+        "target",
+        "build",
+        "dist",
+        "__pycache__",
+        ".venv",
+    ];
+    // Precompute the stub tokens to look for, mapped back to the service name.
+    // Longest-token-first so "{Svc}Client" is preferred over a bare service-name
+    // substring; case-insensitive match is done on the line.
+    let mut token_to_service: Vec<(String, String)> = Vec::new();
+    for svc in services {
+        let snake = super::grpc::to_snake_case(svc);
+        token_to_service.push((format!("{svc}Stub").to_lowercase(), svc.clone()));
+        token_to_service.push((format!("{svc}Client").to_lowercase(), svc.clone()));
+        token_to_service.push((format!("{svc}Grpc").to_lowercase(), svc.clone()));
+        token_to_service.push((format!("{snake}_pb2_grpc"), svc.clone()));
+    }
+    let mut results = Vec::new();
+    walk_for_grpc_stubs(root, root, SKIP_DIRS, &token_to_service, &mut results);
+    results
+}
+
+fn walk_for_grpc_stubs(
+    base: &Path,
+    dir: &Path,
+    skip: &[&str],
+    token_to_service: &[(String, String)],
+    results: &mut Vec<(String, String, String)>,
+) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+
+        if path.is_dir() {
+            if !skip.contains(&name_str.as_ref()) && !name_str.starts_with('.') {
+                walk_for_grpc_stubs(base, &path, skip, token_to_service, results);
+            }
+        } else if path.is_file() {
+            // Only scan real source; skip .proto (that's the producer) and
+            // test/doc files (consistent with the HTTP scanners).
+            let rel = path
+                .strip_prefix(base)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if rel.ends_with(".proto") || is_test_or_doc_file(&rel) {
+                continue;
+            }
+            let content = match std::fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            // One hit per (file, service) — first reference line is enough to
+            // attach the dependency; dedup keeps the earliest.
+            let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            for (line_num, line) in content.lines().enumerate() {
+                let line_lower = line.to_lowercase();
+                for (token, svc) in token_to_service {
+                    if seen.contains(svc.as_str()) {
+                        continue;
+                    }
+                    if line_lower.contains(token.as_str()) {
+                        seen.insert(svc.as_str());
+                        results.push((rel.clone(), format!("line:{}", line_num + 1), svc.clone()));
                     }
                 }
             }
