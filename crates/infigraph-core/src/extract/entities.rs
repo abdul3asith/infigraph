@@ -214,7 +214,8 @@ pub fn extract_entities(
             let return_type = extract_child_text(node, "return_type", source)
                 .or_else(|| extract_child_text(node, "result", source));
 
-            let visibility = extract_visibility(node, source);
+            let visibility =
+                extract_visibility(node, source).or_else(|| default_visibility(&name, language));
 
             symbols.push(Symbol {
                 id,
@@ -448,6 +449,40 @@ fn extract_visibility(node: Node, source: &[u8]) -> Option<String> {
         }
     }
     None
+}
+
+/// Fallback visibility for languages that have no explicit access-modifier
+/// keyword (Python, JavaScript, Ruby, Go, …). `extract_visibility` returns
+/// `None` for these, which previously stored an empty string and made every
+/// such symbol invisible to `get_api_surface` (WHERE s.visibility = 'public').
+///
+/// Convention: a leading underscore marks a symbol private (Python `_x`,
+/// JS/TS `_x`); Go uses capitalization (lower-case first letter = unexported).
+/// Everything else defaults to `public`. Languages WITH real modifiers
+/// (rust/java/c#/kotlin/swift/…) are intentionally excluded — for those,
+/// absence of a modifier is a deliberate signal (package-private / module-
+/// private) and must not be rewritten to public.
+fn default_visibility(name: &str, language: &str) -> Option<String> {
+    let public = Some("public".to_string());
+    let private = Some("private".to_string());
+    match language {
+        "python" | "javascript" | "typescript" | "ruby" | "lua" | "r" => {
+            if name.starts_with('_') {
+                private
+            } else {
+                public
+            }
+        }
+        // Go: exported iff the first letter is upper-case.
+        "go" => match name.chars().next() {
+            Some(c) if c.is_uppercase() => public,
+            Some(_) => private,
+            None => None,
+        },
+        // Languages with explicit modifiers: leave as-is (None → stored empty),
+        // so we don't override a meaningful "no modifier" with "public".
+        _ => None,
+    }
 }
 
 const TEST_ATTR_PATTERNS: &[&str] = &[
@@ -875,6 +910,39 @@ mod tests {
             "typescript"
         ));
         assert!(!is_test_by_name_and_path("it", "src/auth.ts", "typescript"));
+    }
+
+    // AIF3X-331 #20: keyword-less languages must default to a concrete
+    // visibility so get_api_surface (WHERE s.visibility = 'public') surfaces
+    // them. Previously extract_visibility returned None → stored '' → invisible.
+    #[test]
+    fn test_default_visibility_keywordless_langs() {
+        // Underscore-convention private
+        for lang in ["python", "javascript", "typescript", "ruby", "lua", "r"] {
+            assert_eq!(
+                default_visibility("public_fn", lang).as_deref(),
+                Some("public"),
+                "{lang}: bare name should default public"
+            );
+            assert_eq!(
+                default_visibility("_private_fn", lang).as_deref(),
+                Some("private"),
+                "{lang}: leading underscore should be private"
+            );
+        }
+        // Go: exported iff capitalized
+        assert_eq!(
+            default_visibility("Exported", "go").as_deref(),
+            Some("public")
+        );
+        assert_eq!(
+            default_visibility("unexported", "go").as_deref(),
+            Some("private")
+        );
+        // Languages with real modifiers keep None (absence of a keyword is a
+        // deliberate signal there, not "public").
+        assert_eq!(default_visibility("foo", "rust"), None);
+        assert_eq!(default_visibility("Foo", "java"), None);
     }
 
     #[test]

@@ -178,9 +178,22 @@ fn test_graph_tools() {
         "refs: missing defining file: {result}"
     );
 
-    // --- get_api_surface ---
+    // --- get_api_surface (AIF3X-331 #20) ---
+    // Python has no visibility keywords; extract_visibility returns None and the
+    // symbols were previously stored with visibility='' and excluded by
+    // get_api_surface's WHERE s.visibility = 'public'. default_visibility now
+    // marks non-underscore Python symbols public, so they must surface here.
     let result = tool_get_api_surface(&a(json!({}))).unwrap();
     assert!(!result.is_empty(), "api_surface: empty response: {result}");
+    assert!(
+        result.contains("process"),
+        "api_surface: public Python function 'process' must appear (visibility \
+         default regressed?): {result}"
+    );
+    assert!(
+        result.contains("BaseModel"),
+        "api_surface: public Python class 'BaseModel' must appear: {result}"
+    );
 
     // --- get_file_deps ---
     let result = tool_get_file_deps(&a(json!({"file": "src/main.py"}))).unwrap();
