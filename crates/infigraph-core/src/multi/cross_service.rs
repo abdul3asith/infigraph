@@ -1526,19 +1526,57 @@ fn scan_source_for_grpc_stubs(root: &Path, services: &[String]) -> Vec<(String, 
         "__pycache__",
         ".venv",
     ];
-    // Precompute the stub tokens to look for, mapped back to the service name.
-    // Longest-token-first so "{Svc}Client" is preferred over a bare service-name
-    // substring; case-insensitive match is done on the line.
+    // Per-language stub tokens (all lower-cased; the scan lower-cases each line).
+    // Each is a self-contained substring that only appears at a real client
+    // call/type site for the given service — the protoc/tonic/grpc codegen
+    // naming IS the contract. Ordered roughly specific→general; the scan records
+    // one hit per (file, service) so overlap is harmless. See tasks #30-34.
     let mut token_to_service: Vec<(String, String)> = Vec::new();
     for svc in services {
-        let snake = super::grpc::to_snake_case(svc);
-        token_to_service.push((format!("{svc}Stub").to_lowercase(), svc.clone()));
-        token_to_service.push((format!("{svc}Client").to_lowercase(), svc.clone()));
-        token_to_service.push((format!("{svc}Grpc").to_lowercase(), svc.clone()));
-        token_to_service.push((format!("{snake}_pb2_grpc"), svc.clone()));
+        let snake = super::grpc::to_snake_case(svc); // UserService -> user_service
+        let lc = svc.to_lowercase();
+        let toks = [
+            // Python (grpcio): generated module + stub class. #30
+            format!("{snake}_pb2_grpc"),
+            format!("{lc}stub"), // {Svc}Stub — also Java plain stub
+            // Go (protoc-gen-go-grpc): New{Svc}Client constructor + {Svc}Client
+            // interface + the server-registration helper. #31
+            format!("new{lc}client"),
+            format!("{lc}client"), // also TS @grpc/grpc-js `new {Svc}Client(...)`
+            format!("register{lc}server"),
+            // Java (grpc-java): {Svc}Grpc holder + typed stub classes. #32
+            format!("{lc}grpc"),
+            format!("{lc}blockingstub"),
+            format!("{lc}futurestub"),
+            // Rust (tonic): {snake}_client module + {Svc}Client type. #34
+            format!("{snake}_client"),
+            // Python server registration (a service reference, not a client, but
+            // still a cross-service coupling worth surfacing). The generated
+            // helper uses the PascalCase service name verbatim
+            // (add_UserServiceServicer_to_server), not snake_case. #30
+            format!("add_{lc}servicer_to_server"),
+        ];
+        for t in toks {
+            token_to_service.push((t, svc.clone()));
+        }
     }
+    // connect-es / connect-web (TS/JS) construct a client from the SERVICE symbol
+    // itself: `createPromiseClient(UserService, transport)` / `createClient(...)`.
+    // There's no {Svc}Client token, so match the factory call AND the service
+    // name on the same line (handled specially in the walker via this marker).
+    let connect_markers: Vec<(String, String)> = services
+        .iter()
+        .map(|svc| (svc.to_lowercase(), svc.clone()))
+        .collect();
     let mut results = Vec::new();
-    walk_for_grpc_stubs(root, root, SKIP_DIRS, &token_to_service, &mut results);
+    walk_for_grpc_stubs(
+        root,
+        root,
+        SKIP_DIRS,
+        &token_to_service,
+        &connect_markers,
+        &mut results,
+    );
     results
 }
 
@@ -1547,6 +1585,7 @@ fn walk_for_grpc_stubs(
     dir: &Path,
     skip: &[&str],
     token_to_service: &[(String, String)],
+    connect_markers: &[(String, String)],
     results: &mut Vec<(String, String, String)>,
 ) {
     let entries = match std::fs::read_dir(dir) {
@@ -1560,7 +1599,14 @@ fn walk_for_grpc_stubs(
 
         if path.is_dir() {
             if !skip.contains(&name_str.as_ref()) && !name_str.starts_with('.') {
-                walk_for_grpc_stubs(base, &path, skip, token_to_service, results);
+                walk_for_grpc_stubs(
+                    base,
+                    &path,
+                    skip,
+                    token_to_service,
+                    connect_markers,
+                    results,
+                );
             }
         } else if path.is_file() {
             // Only scan real source; skip .proto (that's the producer) and
@@ -1589,6 +1635,27 @@ fn walk_for_grpc_stubs(
                     if line_lower.contains(token.as_str()) {
                         seen.insert(svc.as_str());
                         results.push((rel.clone(), format!("line:{}", line_num + 1), svc.clone()));
+                    }
+                }
+                // connect-es/connect-web: createPromiseClient(Svc, ...) /
+                // createClient(Svc, ...) — the client is built from the service
+                // symbol, so require both the factory call and the service name
+                // on the same line (bare service name alone is too broad). #33
+                let is_connect_call = line_lower.contains("createpromiseclient")
+                    || line_lower.contains("createclient");
+                if is_connect_call {
+                    for (svc_lc, svc) in connect_markers {
+                        if seen.contains(svc.as_str()) {
+                            continue;
+                        }
+                        if line_lower.contains(svc_lc.as_str()) {
+                            seen.insert(svc.as_str());
+                            results.push((
+                                rel.clone(),
+                                format!("line:{}", line_num + 1),
+                                svc.clone(),
+                            ));
+                        }
                     }
                 }
             }

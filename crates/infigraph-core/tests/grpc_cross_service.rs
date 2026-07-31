@@ -251,6 +251,105 @@ fn test_client_proto_producer_not_scanned_as_consumer() {
     );
 }
 
+// ── Layer 2b: per-language idiomatic call-site patterns (#30-34) ─────────────
+//
+// Beyond the bare {Svc}Stub/{Svc}Client type name, each language's generated
+// gRPC client is USED via a codegen-specific idiom. These assert the real
+// call/construction sites are detected, not just a type annotation.
+
+/// Python (grpcio): the generated module import is the strongest signal. #30
+#[test]
+fn test_client_py_pb2_grpc_module_import() {
+    let deps = grpc_deps_for(
+        "svc.py",
+        "import user_service_pb2_grpc as g\n\ndef make(ch):\n    return g.UserServiceStub(ch)\n",
+    );
+    assert!(
+        deps.iter().any(|d| d.target_service == "user-service"),
+        "Python `import {{svc}}_pb2_grpc` must link: {deps:?}"
+    );
+}
+
+/// Python server registration is a cross-service coupling too. #30
+#[test]
+fn test_client_py_add_servicer_to_server() {
+    let deps = grpc_deps_for(
+        "server.py",
+        "def serve(server, impl):\n    add_UserServiceServicer_to_server(impl, server)\n",
+    );
+    assert!(
+        deps.iter().any(|d| d.target_service == "user-service"),
+        "Python add_{{Svc}}Servicer_to_server must link: {deps:?}"
+    );
+}
+
+/// Go (protoc-gen-go-grpc): the New{Svc}Client constructor at the call site. #31
+#[test]
+fn test_client_go_new_client_constructor() {
+    let deps = grpc_deps_for(
+        "main.go",
+        "package main\n\nfunc dial(conn *grpc.ClientConn) {\n    c := pb.NewUserServiceClient(conn)\n    _ = c\n}\n",
+    );
+    assert!(
+        deps.iter().any(|d| d.target_service == "user-service"),
+        "Go New{{Svc}}Client(conn) constructor must link: {deps:?}"
+    );
+}
+
+/// Java (grpc-java): {Svc}Grpc.newBlockingStub(channel). #32
+#[test]
+fn test_client_java_grpc_blocking_stub() {
+    let deps = grpc_deps_for(
+        "Client.java",
+        "class Client {\n  void go(Channel ch) {\n    var s = UserServiceGrpc.newBlockingStub(ch);\n  }\n}\n",
+    );
+    assert!(
+        deps.iter().any(|d| d.target_service == "user-service"),
+        "Java {{Svc}}Grpc.newBlockingStub must link: {deps:?}"
+    );
+}
+
+/// TS/JS (connect-es): createPromiseClient(Service, transport) — client built
+/// from the service symbol, no {Svc}Client token. #33
+#[test]
+fn test_client_ts_connect_es_create_client() {
+    let deps = grpc_deps_for(
+        "client.ts",
+        "import { createPromiseClient } from '@connectrpc/connect';\n\nexport function make(t) {\n  return createPromiseClient(UserService, t);\n}\n",
+    );
+    assert!(
+        deps.iter().any(|d| d.target_service == "user-service"),
+        "TS connect-es createPromiseClient(Svc, ...) must link: {deps:?}"
+    );
+}
+
+/// Rust (tonic): {snake}_client module path + {Svc}Client::connect. #34
+#[test]
+fn test_client_rust_tonic_module_path() {
+    let deps = grpc_deps_for(
+        "client.rs",
+        "use user_service_client::UserServiceClient;\n\nasync fn dial() {\n    let _c = UserServiceClient::connect(\"http://x\").await;\n}\n",
+    );
+    assert!(
+        deps.iter().any(|d| d.target_service == "user-service"),
+        "Rust tonic {{snake}}_client::{{Svc}}Client must link: {deps:?}"
+    );
+}
+
+/// connect-es factory WITHOUT the service name on the line must not link
+/// (guards the same-line requirement for the createClient marker). #33
+#[test]
+fn test_client_connect_es_requires_service_on_same_line() {
+    let deps = grpc_deps_for(
+        "client.ts",
+        "import { createPromiseClient } from '@connectrpc/connect';\n\nexport function make(t) {\n  return createPromiseClient(SomeOtherService, t);\n}\n",
+    );
+    assert!(
+        deps.is_empty(),
+        "createPromiseClient for a different service must not link user-service: {deps:?}"
+    );
+}
+
 // ── Layer 3: end-to-end local group build ────────────────────────────────────
 
 const PROTO_PRODUCER: &str =
