@@ -307,6 +307,20 @@ fn find_parent_class(node: Node, source: &[u8]) -> Option<String> {
                 .child_by_field_name("name")
                 .map(|name_node| node_text(name_node, source));
         }
+        // Protobuf: an `rpc` lives inside a `service` node. The service name has
+        // no "name" field — it's a `service_name` child. Without this, proto RPC
+        // methods get an empty parent, so gRPC contract extraction (which groups
+        // RPCs under their service) finds nothing (AIF3X-331 #21).
+        if n.kind() == "service" {
+            let mut cursor = n.walk();
+            let name = n
+                .children(&mut cursor)
+                .find(|c| c.kind() == "service_name" || c.kind() == "message_name")
+                .map(|name_node| node_text(name_node, source));
+            if let Some(name) = name {
+                return Some(name);
+            }
+        }
         current = n.parent();
     }
     None

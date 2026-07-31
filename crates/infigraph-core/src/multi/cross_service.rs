@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::lang::LanguageRegistry;
 use crate::Infigraph;
 
+use super::grpc::to_snake_case;
 use super::{ContractKind, Registry};
 
 /// A cross-service dependency: service A calls service B at a specific route.
@@ -504,6 +505,88 @@ pub fn detect_cross_service_deps(
                             target_path: format!("/v1/mcp/{}/", mcp_topic),
                             url_found: mcp_url.clone(),
                         });
+                    }
+                }
+            }
+        }
+    }
+
+    // gRPC cross-service detection (AIF3X-331 #21). A producer defines a service
+    // in a .proto (GrpcService contracts, keyed here by service NAME → owning
+    // repo). A consumer references the generated stub by naming convention
+    // ({Service}Stub / {Service}Client / {Service}Grpc / {service}_pb2_grpc).
+    // Match consumer stub symbols to producer services to emit a dep. This is
+    // name-convention-based because protoc's generated stub names ARE the
+    // contract — the client never imports the .proto directly.
+    {
+        // service-name → owning service, from GrpcService contracts. Parse the
+        // "/Service/Rpc" path to recover the service name.
+        let mut grpc_owner: HashMap<String, String> = HashMap::new();
+        for contract in &group.contracts {
+            if contract.kind == ContractKind::GrpcService {
+                if let Some(svc) = contract.path.trim_start_matches('/').split('/').next() {
+                    if !svc.is_empty() {
+                        grpc_owner
+                            .entry(svc.to_string())
+                            .or_insert_with(|| contract.service.clone());
+                    }
+                }
+            }
+        }
+
+        if !grpc_owner.is_empty() {
+            for repo_name in &group.repos {
+                let entry = match registry.repos.get(repo_name) {
+                    Some(e) => e.clone(),
+                    None => continue,
+                };
+                let mut prism = match Infigraph::open(&entry.path, LanguageRegistry::new()) {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+                if prism.init().is_err() {
+                    continue;
+                }
+                let backend = match prism.backend() {
+                    Some(b) => b,
+                    None => continue,
+                };
+
+                for (svc_name, owner) in &grpc_owner {
+                    // The consumer repo must not be the producer of this service.
+                    if owner == repo_name {
+                        continue;
+                    }
+                    let snake = to_snake_case(svc_name);
+                    let patterns = [
+                        format!("{svc_name}Stub"),
+                        format!("{svc_name}Client"),
+                        format!("{svc_name}Grpc"),
+                        format!("{snake}_pb2_grpc"),
+                    ];
+                    for pat in &patterns {
+                        let q = format!(
+                            "MATCH (s:Symbol) WHERE s.name CONTAINS '{}' AND NOT s.file ENDS WITH '.proto' RETURN s.name, s.file, s.id",
+                            crate::escape_str(pat),
+                        );
+                        let rows = match backend.raw_query(&q) {
+                            Ok(r) => r,
+                            Err(_) => continue,
+                        };
+                        for row in &rows {
+                            if row.len() < 3 {
+                                continue;
+                            }
+                            deps.push(CrossServiceDep {
+                                caller_service: repo_name.clone(),
+                                caller_file: row[1].clone(),
+                                caller_symbol: row[2].clone(),
+                                target_service: owner.clone(),
+                                target_method: "GRPC".to_string(),
+                                target_path: format!("/{svc_name}"),
+                                url_found: format!("grpc://{svc_name}"),
+                            });
+                        }
                     }
                 }
             }
