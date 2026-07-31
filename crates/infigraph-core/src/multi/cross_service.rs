@@ -552,6 +552,16 @@ pub fn detect_cross_service_deps(
                     None => continue,
                 };
 
+                // Scope to this repo's namespace on a shared (remote/Neo4j) graph,
+                // same as the HTTP client scan above — otherwise a stub symbol in
+                // ANY repo of the shared graph would match. Local per-repo graphs
+                // store unprefixed paths, so the clause is empty there.
+                let ns = crate::multi::remote_namespace(&group.org, repo_name);
+                let ns_clause = ns
+                    .as_ref()
+                    .map(|n| format!(" AND s.file STARTS WITH '{}/'", crate::escape_str(n)))
+                    .unwrap_or_default();
+
                 for (svc_name, owner) in &grpc_owner {
                     // The consumer repo must not be the producer of this service.
                     if owner == repo_name {
@@ -566,8 +576,9 @@ pub fn detect_cross_service_deps(
                     ];
                     for pat in &patterns {
                         let q = format!(
-                            "MATCH (s:Symbol) WHERE s.name CONTAINS '{}' AND NOT s.file ENDS WITH '.proto' RETURN s.name, s.file, s.id",
+                            "MATCH (s:Symbol) WHERE s.name CONTAINS '{}' AND NOT s.file ENDS WITH '.proto'{} RETURN s.name, s.file, s.id",
                             crate::escape_str(pat),
+                            ns_clause,
                         );
                         let rows = match backend.raw_query(&q) {
                             Ok(r) => r,
