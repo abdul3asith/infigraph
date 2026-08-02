@@ -282,14 +282,22 @@ pub fn extract_entities(
         }
     }
 
-    // Deduplicate by ID — prefer more specific kind (Test > Function)
+    // Deduplicate by ID — multiple query patterns (e.g. bare vs. annotated
+    // decorator variants) can match the same definition node. Prefer the more
+    // specific kind (Test > Function/Method), and always keep the richest
+    // docstring seen so an earlier bare-pattern match doesn't blank out a
+    // later match's decorator/annotation text.
     let mut seen = std::collections::HashMap::new();
     for sym in symbols {
         seen.entry(sym.id.clone())
             .and_modify(|existing: &mut Symbol| {
-                // Test is more specific than Function
                 if sym.kind == SymbolKind::Test && existing.kind == SymbolKind::Function {
-                    *existing = sym.clone();
+                    existing.kind = sym.kind.clone();
+                }
+                let existing_len = existing.docstring.as_deref().map_or(0, str::len);
+                let new_len = sym.docstring.as_deref().map_or(0, str::len);
+                if new_len > existing_len {
+                    existing.docstring = sym.docstring.clone();
                 }
             })
             .or_insert(sym);
