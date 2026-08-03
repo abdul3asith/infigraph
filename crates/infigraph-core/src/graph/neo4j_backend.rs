@@ -714,9 +714,14 @@ impl GraphBackend for Neo4jBackend {
     }
 
     fn callers_of(&self, symbol_id: &str) -> Result<Vec<String>> {
+        // Also surfaces FastAPI-style DI/middleware registration sites
+        // (INJECTS_DEPENDENCY, REGISTERS_MIDDLEWARE) alongside real CALLS
+        // edges, matching KuzuBackend/GraphQuery::callers_of — AIF3X-331 #16.
+        // Neo4j returns an empty match (not an error) for an edge type with
+        // zero instances, so this is safe even for non-Python repos.
         self.collect_strings(
             &format!(
-                "MATCH (caller:Symbol)-[:CALLS]->(s:Symbol {{id: '{}'}}) RETURN caller.id AS id",
+                "MATCH (caller:Symbol)-[:CALLS|INJECTS_DEPENDENCY|REGISTERS_MIDDLEWARE]->(s:Symbol {{id: '{}'}}) RETURN caller.id AS id",
                 escape(symbol_id)
             ),
             "id",
