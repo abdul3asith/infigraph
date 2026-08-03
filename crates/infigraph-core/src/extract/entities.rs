@@ -298,10 +298,13 @@ pub fn extract_entities(
     }
 
     // Deduplicate by ID — multiple query patterns (e.g. bare vs. annotated
-    // decorator variants) can match the same definition node. Prefer the more
-    // specific kind (Test > Function/Method), and always keep the richest
-    // docstring seen so an earlier bare-pattern match doesn't blank out a
-    // later match's decorator/annotation text.
+    // decorator variants, or a params/return_type-capturing pattern vs. an
+    // annotation-capturing one) can match the same definition node, each
+    // populating a different subset of fields. Prefer the more specific kind
+    // (Test > Function/Method), keep the richest docstring seen so an
+    // earlier bare-pattern match doesn't blank out a later match's
+    // decorator/annotation text, and fill in parameters/return_type from any
+    // duplicate match that has them if the kept entry doesn't yet.
     let mut seen = std::collections::HashMap::new();
     for sym in symbols {
         seen.entry(sym.id.clone())
@@ -313,6 +316,12 @@ pub fn extract_entities(
                 let new_len = sym.docstring.as_deref().map_or(0, str::len);
                 if new_len > existing_len {
                     existing.docstring = sym.docstring.clone();
+                }
+                if existing.parameters.is_none() && sym.parameters.is_some() {
+                    existing.parameters = sym.parameters.clone();
+                }
+                if existing.return_type.is_none() && sym.return_type.is_some() {
+                    existing.return_type = sym.return_type.clone();
                 }
             })
             .or_insert(sym);
@@ -974,6 +983,60 @@ mod tests {
         assert_eq!(symbols.len(), 1);
         assert!(symbols[0].parameters.is_some());
         assert_eq!(symbols[0].return_type, None);
+    }
+
+    #[test]
+    fn test_dedup_merges_params_from_one_pattern_with_docstring_from_another() {
+        // Regression test for a real interaction bug: when two separate
+        // .scm patterns match the same function_declaration node -- one
+        // capturing @func.params/@func.return_type (no decorator), another
+        // capturing @func.decorator/@func.docstring (no params) -- the
+        // dedup step used to keep only whichever match's Symbol was
+        // inserted first, silently dropping the other match's fields.
+        // Both parameters/return_type AND docstring must survive together.
+        let grammar = tree_sitter_kotlin_ng::LANGUAGE.into();
+        let src = b"@PostMapping(\"/x\")\nfun render(templateId: String): String {\n    return templateId\n}\n";
+        let mut parser = Parser::new();
+        parser.set_language(&grammar).unwrap();
+        let tree = parser.parse(src, None).unwrap();
+        let root = tree.root_node();
+
+        let query = tree_sitter::Query::new(
+            &grammar,
+            "(function_declaration\n  \
+               name: (identifier) @func.name\n  \
+               (function_value_parameters) @func.params\n  \
+               (type)? @func.return_type) @func.def\n\
+             (function_declaration\n  \
+               (modifiers\n    \
+                 (annotation\n      \
+                   (constructor_invocation\n        \
+                     (user_type\n          \
+                       (identifier) @func.decorator)\n        \
+                     (value_arguments\n          \
+                       (value_argument\n            \
+                         (string_literal\n              \
+                           (string_content) @func.docstring))?))))\n  \
+               name: (identifier) @func.name) @func.def",
+        )
+        .unwrap();
+
+        let symbols = extract_entities("render.kt", src, root, &query, "kotlin");
+        assert_eq!(symbols.len(), 1);
+        assert!(
+            symbols[0].parameters.is_some(),
+            "parameters from the params-capturing pattern must survive dedup"
+        );
+        assert_eq!(
+            symbols[0].return_type.as_deref(),
+            Some("String"),
+            "return_type from the params-capturing pattern must survive dedup"
+        );
+        assert_eq!(
+            symbols[0].docstring.as_deref(),
+            Some("PostMapping /x"),
+            "docstring from the annotation-capturing pattern must survive dedup"
+        );
     }
 
     #[test]
