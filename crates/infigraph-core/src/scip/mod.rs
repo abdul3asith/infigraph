@@ -15,6 +15,34 @@ use crate::graph::store_util::{
 use crate::graph::GraphStore;
 use crate::model::{Span, SymbolKind};
 
+/// True when `scip_sym` is a member (e.g. a parameter) of a symbol we
+/// already know about, per SCIP's own descriptor grammar: strip a single
+/// trailing `(...)` group and check whether what remains is a moniker
+/// already present in `known` (built from every other non-local
+/// definition occurrence in this same import pass, before this check
+/// ever runs -- see `scip_sym_to_file_name`, populated before Pass 1).
+///
+/// Verified against real `scip-typescript` output: a parameter's moniker
+/// is exactly its enclosing method's own moniker (always ending in `.`)
+/// with `(paramName)` appended -- nothing else -- so this is an exact
+/// string match against already-known data, not a re-derived heuristic.
+/// Deliberately does NOT use `SymbolInformation.kind`: verified always
+/// `UnspecifiedKind` in real output, so it carries no usable signal.
+///
+/// A normal top-level definition's own moniker always ends in `.` (Term),
+/// `#` (Type), or `().` (Method) per SCIP's descriptor grammar -- never a
+/// bare `)` -- so this never fires for a legitimately-new symbol; it can
+/// only match nested member descriptors.
+fn is_member_of_known_symbol(scip_sym: &str, known: &HashMap<String, (String, String)>) -> bool {
+    let Some(without_group) = scip_sym.strip_suffix(')') else {
+        return false;
+    };
+    let Some(open) = without_group.rfind('(') else {
+        return false;
+    };
+    known.contains_key(&without_group[..open])
+}
+
 /// Import a SCIP index.scip file into the Infigraph graph store.
 ///
 /// Matches SCIP definitions to existing tree-sitter symbols by (file, name)
@@ -118,7 +146,15 @@ pub fn import_scip_index(
     }
 
     // Pass 1: collect enrichments and new symbols in memory
-    let mut enrichments: Vec<(String, u32, u32, String)> = Vec::new();
+    //
+    // Enrichments only ever update `docstring`. Existing symbols already
+    // have a correct start_line/end_line from tree-sitter's full-body AST
+    // extraction; a SCIP definition occurrence's range is the span of the
+    // identifier token itself, not the enclosing declaration, so it must
+    // never be written back over the tree-sitter-derived span (previously
+    // it was, silently collapsing every enriched symbol's displayed source
+    // to ~1 line).
+    let mut enrichments: Vec<(String, String)> = Vec::new();
     let mut new_symbols: Vec<(String, String, String, String, u32, u32, String)> = Vec::new();
 
     for doc in &index.documents {
@@ -138,6 +174,9 @@ pub fn import_scip_index(
             if scip_sym.starts_with("local ") || scip_sym.starts_with('<') {
                 continue;
             }
+            if is_member_of_known_symbol(scip_sym, &scip_sym_to_file_name) {
+                continue;
+            }
 
             let name = scip_sym_to_name(scip_sym);
             let span = parse_range(&occ.range, file);
@@ -150,12 +189,7 @@ pub fn import_scip_index(
             let key = (file.clone(), name.clone());
             if let Some(ids) = file_name_to_ids.get(&key) {
                 for sid in ids {
-                    enrichments.push((
-                        sid.clone(),
-                        span.start_line,
-                        span.end_line,
-                        docstring.to_string(),
-                    ));
+                    enrichments.push((sid.clone(), docstring.to_string()));
                     stats.symbols_enriched += 1;
                 }
             } else {
@@ -333,22 +367,16 @@ pub fn import_scip_index(
         let _ = std::fs::remove_file(&sym_pq);
     }
 
-    // Bulk write enrichments via UNWIND (updates can't use COPY FROM)
+    // Bulk write enrichments via UNWIND (updates can't use COPY FROM).
+    // Only docstring is enriched -- see the note on `enrichments` above for
+    // why start_line/end_line must never be written here.
     for chunk in enrichments.chunks(CHUNK) {
         let rows: Vec<String> = chunk
             .iter()
-            .map(|(id, start, end, doc)| {
-                format!(
-                    "{{id: '{}', sl: {}, el: {}, doc: '{}'}}",
-                    escape(id),
-                    start,
-                    end,
-                    escape(doc)
-                )
-            })
+            .map(|(id, doc)| format!("{{id: '{}', doc: '{}'}}", escape(id), escape(doc)))
             .collect();
         let _ = conn.query(&format!(
-            "UNWIND [{}] AS e MATCH (s:Symbol) WHERE s.id = e.id SET s.start_line = e.sl, s.end_line = e.el, s.docstring = e.doc",
+            "UNWIND [{}] AS e MATCH (s:Symbol) WHERE s.id = e.id SET s.docstring = e.doc",
             rows.join(", ")
         ));
     }
@@ -897,5 +925,255 @@ mod tests {
             .query("MATCH (a:Symbol)-[:INHERITS]->(b:Symbol) RETURN a.name, b.name")
             .unwrap();
         assert!(rows.into_iter().next().is_none());
+    }
+
+    #[test]
+    fn enrichment_does_not_overwrite_existing_symbol_span() {
+        let env = TestEnv::new();
+        let conn = env.store.connection().unwrap();
+
+        // Simulate tree-sitter's correct full-body extraction: a function
+        // spanning lines 10-50.
+        conn.query(
+            "CREATE (:Symbol {id: 'test.ts::widen', name: 'widen', kind: 'function', \
+             file: 'test.ts', start_line: 10, end_line: 50, signature_hash: '', \
+             language: 'typescript', visibility: 'public', parent: '', docstring: '', \
+             complexity: 0, parameters: '', return_type: ''})",
+        )
+        .unwrap();
+
+        // SCIP's definition occurrence for the same symbol only spans the
+        // identifier token itself (a single line) -- never the full body.
+        let sym = scip_symbol("widen", "test.ts");
+        let doc = Document {
+            relative_path: "test.ts".to_string(),
+            occurrences: vec![Occurrence {
+                range: vec![9, 9, 9, 14], // 0-based line 9 == 1-based line 10
+                symbol: sym.clone(),
+                symbol_roles: SymbolRole::Definition as i32,
+                ..Default::default()
+            }],
+            symbols: vec![SymbolInformation {
+                symbol: sym,
+                documentation: vec!["Widens a value.".to_string()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let index = Index {
+            documents: vec![doc],
+            ..Default::default()
+        };
+        let bytes = index.write_to_bytes().unwrap();
+        let index_path = env._dir.path().join("index.scip");
+        std::fs::write(&index_path, bytes).unwrap();
+
+        let stats = import_scip_index(&index_path, &env.store, None).unwrap();
+        assert_eq!(stats.symbols_enriched, 1, "enrichment path must have run");
+
+        let rows = conn
+            .query(
+                "MATCH (s:Symbol {id: 'test.ts::widen'}) RETURN s.start_line, s.end_line, s.docstring",
+            )
+            .unwrap();
+        let row = rows.into_iter().next().expect("symbol must still exist");
+        let start: i64 = row[0].to_string().parse().unwrap();
+        let end: i64 = row[1].to_string().parse().unwrap();
+        let docstring = row[2].to_string().trim_matches('"').to_string();
+
+        assert_eq!(
+            start, 10,
+            "SCIP enrichment must not overwrite the existing full-body start_line with the narrow definition-occurrence range"
+        );
+        assert_eq!(
+            end, 50,
+            "SCIP enrichment must not overwrite the existing full-body end_line with the narrow definition-occurrence range"
+        );
+        assert_eq!(
+            docstring, "Widens a value.",
+            "docstring enrichment should still apply"
+        );
+    }
+
+    #[test]
+    fn scip_parameter_descriptor_does_not_become_a_new_symbol() {
+        let env = TestEnv::new();
+        let file = "test.ts";
+        // Real scip-typescript shape, verified against real output: a
+        // parameter's moniker is exactly its enclosing method's own moniker
+        // (always ending in `.`) with `(paramName)` appended.
+        let method_sym = "scip-test npm test 1.0.0 `test.ts`/mintFn().".to_string();
+        let param_sym = "scip-test npm test 1.0.0 `test.ts`/mintFn().(rulesBag)".to_string();
+
+        let doc = Document {
+            relative_path: file.to_string(),
+            occurrences: vec![
+                Occurrence {
+                    range: vec![0, 16, 22],
+                    symbol: method_sym.clone(),
+                    symbol_roles: SymbolRole::Definition as i32,
+                    ..Default::default()
+                },
+                Occurrence {
+                    range: vec![0, 23, 31],
+                    symbol: param_sym.clone(),
+                    symbol_roles: SymbolRole::Definition as i32,
+                    ..Default::default()
+                },
+            ],
+            symbols: vec![
+                SymbolInformation {
+                    symbol: method_sym.clone(),
+                    ..Default::default()
+                },
+                SymbolInformation {
+                    symbol: param_sym.clone(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let index = Index {
+            documents: vec![doc],
+            ..Default::default()
+        };
+        let bytes = index.write_to_bytes().unwrap();
+        let index_path = env._dir.path().join("index.scip");
+        std::fs::write(&index_path, bytes).unwrap();
+
+        let stats = import_scip_index(&index_path, &env.store, None).unwrap();
+        assert_eq!(
+            stats.symbols_added, 1,
+            "only the method itself should become a new symbol -- the parameter must be suppressed"
+        );
+
+        let conn = env.store.connection().unwrap();
+        let rows = conn.query("MATCH (s:Symbol) RETURN s.name").unwrap();
+        let names: Vec<String> = rows
+            .into_iter()
+            .map(|row| row[0].to_string().trim_matches('"').to_string())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["mintFn".to_string()],
+            "no node should exist for the parameter descriptor, and its name must not \
+             leak through as a raw unparsed moniker on any node"
+        );
+    }
+
+    #[test]
+    fn calls_edge_still_attributes_to_enclosing_method_when_a_parameter_is_suppressed() {
+        let env = TestEnv::new();
+        let conn = env.store.connection().unwrap();
+
+        // Seed two pre-existing tree-sitter symbols with real full-body
+        // spans, the normal case: SCIP enriches an already-known function,
+        // it doesn't need to add it.
+        conn.query(
+            "CREATE (:Symbol {id: 'test.ts::mintFn', name: 'mintFn', kind: 'function', \
+             file: 'test.ts', start_line: 1, end_line: 10, signature_hash: '', \
+             language: 'typescript', visibility: 'public', parent: '', docstring: '', \
+             complexity: 0, parameters: '', return_type: ''})",
+        )
+        .unwrap();
+        conn.query(
+            "CREATE (:Symbol {id: 'test.ts::helper', name: 'helper', kind: 'function', \
+             file: 'test.ts', start_line: 20, end_line: 25, signature_hash: '', \
+             language: 'typescript', visibility: 'public', parent: '', docstring: '', \
+             complexity: 0, parameters: '', return_type: ''})",
+        )
+        .unwrap();
+
+        let file = "test.ts";
+        let method_sym = "scip-test npm test 1.0.0 `test.ts`/mintFn().".to_string();
+        let param_sym = "scip-test npm test 1.0.0 `test.ts`/mintFn().(rulesBag)".to_string();
+        let helper_sym = "scip-test npm test 1.0.0 `test.ts`/helper().".to_string();
+
+        let doc = Document {
+            relative_path: file.to_string(),
+            occurrences: vec![
+                // mintFn's own definition occurrence (identifier token only,
+                // line 0 == 1-based line 1, matching the seeded start_line).
+                Occurrence {
+                    range: vec![0, 16, 22],
+                    symbol: method_sym.clone(),
+                    symbol_roles: SymbolRole::Definition as i32,
+                    ..Default::default()
+                },
+                // Its parameter -- must be suppressed, not create a node
+                // that could steal container_id for the reference below.
+                Occurrence {
+                    range: vec![0, 23, 31],
+                    symbol: param_sym.clone(),
+                    symbol_roles: SymbolRole::Definition as i32,
+                    ..Default::default()
+                },
+                // helper's own definition occurrence (1-based line 20).
+                Occurrence {
+                    range: vec![19, 9, 15],
+                    symbol: helper_sym.clone(),
+                    symbol_roles: SymbolRole::Definition as i32,
+                    ..Default::default()
+                },
+                // A reference to helper() from inside mintFn's body (line 4,
+                // 0-based -> 1-based line 5, within mintFn's seeded [1,10]
+                // span and nowhere near the suppressed parameter's own
+                // narrow single-line range).
+                Occurrence {
+                    range: vec![4, 2, 8],
+                    symbol: helper_sym.clone(),
+                    symbol_roles: 0, // reference, not definition
+                    ..Default::default()
+                },
+            ],
+            symbols: vec![
+                SymbolInformation {
+                    symbol: method_sym.clone(),
+                    ..Default::default()
+                },
+                SymbolInformation {
+                    symbol: param_sym.clone(),
+                    ..Default::default()
+                },
+                SymbolInformation {
+                    symbol: helper_sym.clone(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let index = Index {
+            documents: vec![doc],
+            ..Default::default()
+        };
+        let bytes = index.write_to_bytes().unwrap();
+        let index_path = env._dir.path().join("index.scip");
+        std::fs::write(&index_path, bytes).unwrap();
+
+        let stats = import_scip_index(&index_path, &env.store, None).unwrap();
+        assert_eq!(
+            stats.symbols_added, 0,
+            "both mintFn and helper already exist -- only enrichment, and the \
+             parameter must be suppressed, not added"
+        );
+
+        let rows = conn
+            .query("MATCH (a:Symbol)-[:CALLS]->(b:Symbol) RETURN a.name, b.name")
+            .unwrap();
+        let pairs: Vec<(String, String)> = rows
+            .into_iter()
+            .map(|row| {
+                (
+                    row[0].to_string().trim_matches('"').to_string(),
+                    row[1].to_string().trim_matches('"').to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![("mintFn".to_string(), "helper".to_string())],
+            "the CALLS edge must attribute to the real enclosing method, not be \
+             dropped or misattributed to a suppressed parameter pseudo-symbol"
+        );
     }
 }
