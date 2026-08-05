@@ -147,7 +147,7 @@ fn fixture_extractions() -> Vec<FileExtraction> {
                     "src/lib.py::validate",
                     RelationKind::Calls,
                 ),
-                rel("src/lib.py", "src/main.py", RelationKind::Imports),
+                rel("src/lib.py", "src/lib.py::main", RelationKind::Imports),
             ],
             statements: vec![
                 stmt("src/lib.py::process", 0, StatementKind::Try, 3, 0),
