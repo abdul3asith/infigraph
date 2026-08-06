@@ -67,32 +67,36 @@ pub(crate) fn detect_from_docstring(
         ("patch", "PATCH"),
     ];
 
-    // Pattern: docstring mentions route/endpoint/api along with an HTTP method
-    let has_route_context = doc_lower.contains("route")
-        || doc_lower.contains("endpoint")
-        || doc_lower.contains("api")
-        || doc_lower.contains("handler")
-        || doc_lower.contains("@app.")
-        || doc_lower.contains("@router.")
-        || doc_lower.contains("handlefunc")
-        || doc_lower.contains("mapping");
+    // Explicit decorator/annotation syntax is hard evidence on its own.
+    let has_decorator = doc_lower.contains("@app.") || doc_lower.contains("@router.");
 
-    if !has_route_context {
-        return None;
-    }
-
-    // Try to extract method from docstring. Match as a whole word (not a
-    // substring of a path segment like "widgets" or "deleted") by requiring
-    // a non-alphanumeric char (or start-of-string) on both sides.
-    let method = http_methods
+    // Match as a whole word (not a substring of a path segment like
+    // "widgets" or "deleted") by requiring a non-alphanumeric char (or
+    // start-of-string) on both sides.
+    let method_kw = http_methods
         .iter()
         .find(|(kw, _)| contains_word(doc_lower, kw))
-        .map(|(_, m)| m.to_string())
-        .unwrap_or_else(|| "GET".to_string());
+        .map(|(_, m)| m.to_string());
 
-    // Try to extract a path from the docstring (look for /something patterns)
-    let path =
-        extract_path_from_text(doc_lower).unwrap_or_else(|| format!("/{}", name.to_lowercase()));
+    let path_from_text = extract_path_from_text(doc_lower);
+
+    if !has_decorator {
+        // Without an explicit decorator, prose alone (e.g. "Responses API
+        // responses", "the endpoint handler") is not evidence -- almost any
+        // docstring in an HTTP-serving codebase mentions "api"/"handler"/
+        // "endpoint" without describing an actual route (AIF3X-331: this
+        // previously matched on those words alone, then defaulted the
+        // method to GET when no verb was found, turning plain helper
+        // functions like `apply_luhn_check` into fabricated `GET
+        // /apply_luhn_check` routes). Require BOTH a real HTTP verb and an
+        // extractable /path token together.
+        if method_kw.is_none() || path_from_text.is_none() {
+            return None;
+        }
+    }
+
+    let method = method_kw.unwrap_or_else(|| "GET".to_string());
+    let path = path_from_text.unwrap_or_else(|| format!("/{}", name.to_lowercase()));
 
     Some(Route {
         method,

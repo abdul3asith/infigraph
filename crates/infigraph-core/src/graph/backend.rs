@@ -99,6 +99,24 @@ pub trait GraphBackend: Send + Sync {
     // ── Read: aggregate queries ──────────────────────────────────────
 
     fn get_api_surface(&self) -> Result<Vec<ApiSymbol>>;
+
+    /// `get_api_surface`, optionally excluding test symbols.
+    /// When `include_tests` is true this is equivalent to `get_api_surface`.
+    ///
+    /// For languages where `visibility` is derived from naming convention
+    /// rather than a real access modifier (e.g. Python: any non-underscore
+    /// name is "public"), every non-underscore test helper and e2e fixture
+    /// otherwise qualifies as "public" too, swamping the real API surface
+    /// (observed: 3795/5718 symbols in a FastAPI repo, almost all under
+    /// app/test/). Filtered here in Rust rather than duplicating a `kind <>
+    /// 'Test'` clause across every backend's own query dialect.
+    fn get_api_surface_filtered(&self, include_tests: bool) -> Result<Vec<ApiSymbol>> {
+        let surface = self.get_api_surface()?;
+        if include_tests {
+            return Ok(surface);
+        }
+        Ok(surface.into_iter().filter(|s| s.kind != "Test").collect())
+    }
     fn get_file_deps(&self, file: &str) -> Result<FileDeps>;
     fn get_type_hierarchy(&self, id: &str, max_depth: u32) -> Result<TypeHierarchy>;
     fn get_test_coverage(&self) -> Result<TestCoverage>;

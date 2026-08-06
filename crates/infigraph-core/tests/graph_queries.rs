@@ -437,6 +437,73 @@ fn test_get_api_surface() {
     assert!(api.iter().all(|s| s.visibility == "public"));
 }
 
+/// For languages where `visibility` is a naming convention rather than a
+/// real access modifier (e.g. Python: any non-underscore name is
+/// "public"), test helpers/fixtures end up marked public too and swamp
+/// the real API surface. get_api_surface_filtered(false) must exclude
+/// SymbolKind::Test symbols; get_api_surface_filtered(true) must match
+/// plain get_api_surface.
+#[test]
+fn test_get_api_surface_filtered_excludes_test_symbols() {
+    use infigraph_core::graph::{GraphBackend, KuzuBackend};
+
+    let extraction = FileExtraction {
+        file: "src/handler.py".to_string(),
+        language: "python".to_string(),
+        content_hash: "hash".to_string(),
+        symbols: vec![
+            sym(
+                "src/handler.py::process_request",
+                "process_request",
+                SymbolKind::Function,
+                "src/handler.py",
+                1,
+                10,
+            ),
+            sym(
+                "src/handler.py::test_process_request_returns_200",
+                "test_process_request_returns_200",
+                SymbolKind::Test,
+                "src/handler.py",
+                12,
+                20,
+            ),
+        ],
+        relations: Vec::new(),
+        statements: Vec::new(),
+    };
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let backend = KuzuBackend::open(&dir.path().join("graph")).unwrap();
+    backend
+        .upsert_files_bulk(std::slice::from_ref(&extraction), true)
+        .unwrap();
+
+    let with_tests = backend.get_api_surface_filtered(true).unwrap();
+    assert!(
+        with_tests.iter().any(|s| s.name == "process_request"),
+        "expected process_request in unfiltered surface, got: {with_tests:?}"
+    );
+    assert!(
+        with_tests
+            .iter()
+            .any(|s| s.name == "test_process_request_returns_200"),
+        "expected the test symbol when include_tests=true, got: {with_tests:?}"
+    );
+
+    let without_tests = backend.get_api_surface_filtered(false).unwrap();
+    assert!(
+        without_tests.iter().any(|s| s.name == "process_request"),
+        "expected process_request to survive filtering, got: {without_tests:?}"
+    );
+    assert!(
+        !without_tests
+            .iter()
+            .any(|s| s.name == "test_process_request_returns_200"),
+        "expected the test symbol excluded when include_tests=false, got: {without_tests:?}"
+    );
+}
+
 #[test]
 fn test_get_file_deps() {
     let tg = setup();
@@ -1418,6 +1485,53 @@ fn test_callers_of_surfaces_middleware_and_dependency_registrations() {
         !deps_callers.is_empty(),
         "expected the Depends(...) registration site to appear as a caller, \
          got: {deps_callers:?}"
+    );
+}
+
+/// AIF3X-331: detect_cross_cutting only matched docstring patterns, so it was
+/// blind to FastAPI's add_middleware(...)/Depends(...) wiring -- that's a
+/// structural registration call site, not a decorator on the target
+/// function's own docstring. It's already captured as REGISTERS_MIDDLEWARE /
+/// INJECTS_DEPENDENCY graph edges during extraction (#16, same fixture as
+/// test_callers_of_surfaces_middleware_and_dependency_registrations above);
+/// this checks detect_cross_cutting surfaces those edges too.
+#[test]
+fn test_detect_cross_cutting_surfaces_middleware_and_dependency_edges() {
+    use infigraph_core::concerns::detect_cross_cutting;
+    use infigraph_core::graph::{GraphBackend, KuzuBackend};
+    use infigraph_languages::bundled_registry;
+
+    let registry = bundled_registry().unwrap();
+    let pack = registry.for_extension(".py").unwrap();
+
+    let middleware_src = b"async def v3_logging_context_middleware(request, call_next):\n    return await call_next(request)\n";
+    let deps_src = b"def validate_request_headers(request):\n    return True\n";
+    let main_src = b"from app.middleware import v3_logging_context_middleware\nfrom app.deps import validate_request_headers\n\ndef create_app():\n    app.add_middleware(BaseHTTPMiddleware, dispatch=v3_logging_context_middleware)\n\nasync def handler(headers=Depends(validate_request_headers)):\n    pass\n";
+
+    let middleware_ext =
+        infigraph_core::extract::extract_file("app/middleware.py", middleware_src, pack).unwrap();
+    let deps_ext = infigraph_core::extract::extract_file("app/deps.py", deps_src, pack).unwrap();
+    let main_ext = infigraph_core::extract::extract_file("app/main.py", main_src, pack).unwrap();
+    let extractions = vec![middleware_ext, deps_ext, main_ext];
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let backend = KuzuBackend::open(&dir.path().join("graph")).unwrap();
+    backend.upsert_files_bulk(&extractions, true).unwrap();
+    backend.resolve_calls(&extractions, None).unwrap();
+
+    let matches = detect_cross_cutting(&backend).unwrap();
+
+    assert!(
+        matches.iter().any(|m| m.kind == "Middleware"
+            && m.symbol_id.contains("v3_logging_context_middleware")),
+        "expected a Middleware concern for the add_middleware(dispatch=...) target, got: {matches:?}"
+    );
+    assert!(
+        matches
+            .iter()
+            .any(|m| m.kind == "DependencyInjection"
+                && m.symbol_id.contains("validate_request_headers")),
+        "expected a DependencyInjection concern for the Depends(...) target, got: {matches:?}"
     );
 }
 

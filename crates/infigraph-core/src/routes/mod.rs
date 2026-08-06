@@ -262,6 +262,42 @@ mod tests {
     }
 
     #[test]
+    fn test_docstring_mentioning_api_without_verb_and_path_is_not_a_route() {
+        // Real false positive (AIF3X-331 re-run): a plain helper whose docstring
+        // happens to say "...Responses API responses..." was previously matched
+        // on the bare substring "api" alone, then the method defaulted to GET
+        // with no real evidence at all, producing a fabricated
+        // "GET /apply_luhn_check" route for a function with no decorator and no
+        // registration.
+        let route = detect_route_from_symbol(
+            "utils.py::apply_luhn_check",
+            "apply_luhn_check",
+            "utils.py",
+            "apply luhn check to llm response to mask pci data. supports chat \
+             completions (modelresponse), gemini (geminichatresponse), and \
+             responses api responses.",
+        );
+        assert!(
+            route.is_none(),
+            "a bare mention of \"api\" with no decorator, no HTTP verb, and no \
+             extractable path must not produce a route, got: {route:?}"
+        );
+    }
+
+    #[test]
+    fn test_docstring_verb_without_path_is_not_a_route() {
+        // An HTTP verb word alone (e.g. incidentally in prose) without any
+        // extractable /path is still not enough evidence.
+        let route = detect_route_from_symbol(
+            "svc.py::get_settings",
+            "get_settings",
+            "svc.py",
+            "get the current settings handler for this service.",
+        );
+        assert!(route.is_none());
+    }
+
+    #[test]
     fn test_plain_function_is_not_a_route() {
         let route =
             detect_route_from_symbol("utils.py::format_string", "format_string", "utils.py", "");
