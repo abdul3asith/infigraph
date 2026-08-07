@@ -160,6 +160,8 @@ pub fn build_combined_graph(registry: &Registry, group_name: &str) -> Result<(us
             "TESTED_BY",
             "READS",
             "WRITES",
+            "REGISTERS_MIDDLEWARE",
+            "INJECTS_DEPENDENCY",
         ];
         for edge_name in &edge_names {
             let edge_export = tmp.join(format!(
